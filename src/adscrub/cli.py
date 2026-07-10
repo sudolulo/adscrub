@@ -1,4 +1,4 @@
-"""adscrub command line: add-feed, ingest, chapters, transcribe, detect, stats (cut/serve: M4+)."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, detect, cut, serve, stats."""
 
 from __future__ import annotations
 
@@ -8,15 +8,10 @@ import sys
 
 import httpx
 
-from . import __version__, chapters, db, detect, ingest, transcribe
+from . import __version__, chapters, cut, db, detect, feed, ingest, transcribe
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
-
-_NOT_BUILT_YET = {
-    "cut": "M4",
-    "serve": "M4/M5",
-}
 
 
 def make_client() -> httpx.Client:
@@ -135,11 +130,43 @@ def cmd_detect(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_cut(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = cut.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(cut.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending cutting", file=sys.stderr)
+        return 1
+
+    def report(r: cut.CutResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}")
+        else:
+            print(f"  ok    {r.title}: removed {r.ad_seconds:.1f}s of ads")
+
+    with make_client() as client:
+        results = cut.cut_pending(conn, client, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    remaining = len(cut.pending_episodes(conn))
+    print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    feed.serve(args.db, args.data_dir, args.base_url, args.bind)
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     feeds = conn.execute("SELECT COUNT(*) FROM feeds").fetchone()[0]
     episodes = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
     segments = conn.execute("SELECT COUNT(*) FROM ad_segments").fetchone()[0]
+    cut_count = conn.execute("SELECT COUNT(*) FROM episodes WHERE cut_path IS NOT NULL").fetchone()[0]
     by_source = conn.execute(
         "SELECT source, COUNT(*) AS n FROM ad_segments GROUP BY source"
     ).fetchall()
@@ -148,16 +175,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"ad_segments: {segments}")
     for row in by_source:
         print(f"  {row['source']:<10} {row['n']}")
+    print(f"cut:         {cut_count}")
     return 0
-
-
-def _cmd_not_built_yet(name: str):
-    def handler(args: argparse.Namespace) -> int:
-        milestone = _NOT_BUILT_YET[name]
-        print(f"`adscrub {name}` is not built yet ({milestone}) — see docs/PLAN.md",
-              file=sys.stderr)
-        return 1
-    return handler
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,12 +219,26 @@ def main(argv: list[str] | None = None) -> int:
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_detect)
 
+    p = sub.add_parser("cut", help="cut ad spans out of episode audio with ffmpeg")
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_cut)
+
+    p = sub.add_parser("serve", help="serve the cleaned feed(s) + cut audio over HTTP")
+    p.add_argument("--bind", default=os.environ.get("ADSCRUB_BIND", "0.0.0.0:8711"),
+                   help="host:port (default: $ADSCRUB_BIND or 0.0.0.0:8711)")
+    p.add_argument("--base-url", default=os.environ.get("ADSCRUB_BASE_URL", "http://localhost:8711"),
+                   help="externally-reachable URL this server is served at — embedded in "
+                        "generated feeds' audio links, so it must resolve from wherever the "
+                        "podcast player runs, not just from this host "
+                        "(default: $ADSCRUB_BASE_URL or http://localhost:8711)")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding cut/ audio (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_serve)
+
     p = sub.add_parser("stats", help="print database counts")
     p.set_defaults(func=cmd_stats)
-
-    for name in _NOT_BUILT_YET:
-        p = sub.add_parser(name, help=f"not built yet ({_NOT_BUILT_YET[name]})")
-        p.set_defaults(func=_cmd_not_built_yet(name))
 
     args = parser.parse_args(argv)
     return args.func(args)

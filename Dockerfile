@@ -1,9 +1,11 @@
-# adscrub: pipeline CLI in one image. No web frontend yet (see docs/PLAN.md M4).
+# adscrub: pipeline CLI + feed server in one image.
 #
-# Every pipeline stage is a one-shot command, e.g.:
+# Default command serves the cleaned feed(s) over HTTP; every pipeline stage is
+# also available as a one-shot command, e.g.:
 #   docker compose run --rm adscrub ingest
 #   docker compose run --rm adscrub chapters
 #   docker compose run --rm adscrub transcribe
+#   docker compose run --rm adscrub cut
 #
 # Build with --build-arg GPU=1 (or `docker compose -f compose.yaml -f compose.gpu.yaml
 # build`) to pull in the cuBLAS/cuDNN extra for faster-whisper's CUDA path — only
@@ -29,7 +31,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else uv sync --frozen --no-dev; fi
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    ADSCRUB_DB=/app/data/adscrub.db
+    ADSCRUB_DB=/app/data/adscrub.db \
+    ADSCRUB_DATA_DIR=/app/data
 
 # gosu drops from root to the unprivileged `adscrub` user after the entrypoint fixes
 # ownership of /app/data. uid/gid 568 matches TrueNAS SCALE's standard "apps" account,
@@ -43,6 +46,7 @@ COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/app/data"]
+EXPOSE 8711
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["adscrub", "stats"]
+CMD ["adscrub", "serve", "--bind", "0.0.0.0:8711"]

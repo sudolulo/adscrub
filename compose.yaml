@@ -1,12 +1,22 @@
-# Pipeline one-shot commands. No web frontend yet (see docs/PLAN.md M4).
-#   docker compose run --rm adscrub add-feed https://feeds.example.com/show
-#   docker compose run --rm adscrub ingest
-#   docker compose run --rm adscrub chapters
-#   docker compose run --rm adscrub transcribe   # CPU by default — see compose.gpu.yaml
-#   docker compose run --rm adscrub stats
+# docker compose up -d                          serves the feed(s) :8711
+# docker compose run --rm adscrub add-feed https://feeds.example.com/show
+# docker compose run --rm adscrub ingest
+# docker compose run --rm adscrub chapters
+# docker compose run --rm adscrub transcribe     # CPU by default — see compose.gpu.yaml
+# docker compose run --rm adscrub detect
+# docker compose run --rm adscrub cut
+#
+# ADSCRUB_BASE_URL must be set to wherever the podcast player can actually
+# reach this container (not localhost) — it's embedded in generated feeds'
+# audio links.
 services:
   adscrub:
     build: .
     image: adscrub:latest
+    ports:
+      - "8711:8711"
+    environment:
+      ADSCRUB_BASE_URL: ${ADSCRUB_BASE_URL:-http://localhost:8711}
     volumes:
       - ./data:/app/data
+    restart: unless-stopped

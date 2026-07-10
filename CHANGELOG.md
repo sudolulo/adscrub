@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-10
+
+### Added
+
+- Ad cutting (`adscrub cut`): merges overlapping ad spans from any source
+  (chapter, LLM — no "which source wins" rule needed, overlap-merging handles it),
+  then `ffmpeg`-extracts the surviving audio and concatenates with `-c copy` (no
+  re-encode, no quality loss). Episode duration comes from `ffprobe` on the real
+  file, not RSS metadata.
+- Feed serving (`adscrub serve`): stdlib `http.server` (dependency-free, same
+  approach as hark's web.py), regenerates a cleaned RSS feed live from the DB at
+  `GET /feed/<id>`. Cut episodes are served locally at `/audio/<id>.<ext>`;
+  everything else still points at its original `audio_url` — nothing gets a local
+  copy unless it was actually cut. No login wall (machine-consumed feed on a
+  trusted network, not a browsable dashboard).
+- `--base-url` is required to make sense of generated audio links (embedded in
+  every cut episode's enclosure); `serve` warns loudly if left at the
+  unreachable `localhost` default instead of failing silently into a broken feed.
+- Docker: default `CMD` now runs `adscrub serve` (port 8711, `restart:
+  unless-stopped`), matching hark/tiltmeter's long-running-service shape;
+  pipeline stages remain one-shot `docker compose run --rm` commands.
+- Shared `audio.py` module: `download_audio`/`probe_duration`, split out of
+  transcribe.py since cut.py needed the same downloaded-audio cache.
+
 ## [0.3.0] - 2026-07-10
 
 ### Added

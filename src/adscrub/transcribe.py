@@ -18,10 +18,10 @@ from pathlib import Path
 
 import httpx
 
+from .audio import DEFAULT_DATA_DIR, download_audio
 from .db import utcnow
 
 DEFAULT_MODEL = os.environ.get("ADSCRUB_WHISPER_MODEL", "small")
-DEFAULT_DATA_DIR = Path(os.environ.get("ADSCRUB_DATA_DIR", "data"))
 
 _model = None
 _model_size = None
@@ -46,21 +46,6 @@ def load_model(model_size: str = DEFAULT_MODEL):
     _model = WhisperModel(model_size, device=device, compute_type=compute_type)
     _model_size = model_size
     return _model
-
-
-def download_audio(client: httpx.Client, audio_url: str, dest: Path) -> Path:
-    """Fetch episode audio to dest if not already cached there."""
-    if dest.exists():
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    with client.stream("GET", audio_url) as resp:
-        resp.raise_for_status()
-        with open(tmp, "wb") as fh:
-            for chunk in resp.iter_bytes():
-                fh.write(chunk)
-    tmp.rename(dest)
-    return dest
 
 
 def transcribe_episode(

@@ -23,9 +23,14 @@ on, and a feed-level proxy works with any podcast app, not just one.
    episode/listener, so a fingerprint/crowdsourced-timestamp database (SponsorBlock
    style) can't catch them. The model points at transcript segment indices, not
    raw timestamps, so stored spans are always grounded in Whisper's own output.
-5. **Cut** (not built — M4) — `ffmpeg` out the ad spans, write the clean audio.
-6. **Serve** (not built — M4/M5) — re-host a cleaned RSS feed pointing at the cut
-   audio; this is the only thing the podcast player ever sees.
+5. **Cut** (done) — `ffmpeg` extracts the surviving (non-ad) spans and concatenates
+   them with no re-encoding (`-c copy` — no quality loss). Ad spans from any source
+   (chapter, LLM) are merged before cutting, so overlapping/duplicate detections
+   collapse automatically rather than needing a "which source wins" rule.
+6. **Serve** (done) — re-hosts a cleaned RSS feed (`GET /feed/<id>`); cut episodes
+   point at locally-served audio (`/audio/<id>.<ext>`), everything else still points
+   at its original URL unchanged. This is the only thing the podcast player ever
+   sees — point AntennaPod at `/feed/<id>` instead of the original feed.
 
 See [docs/PLAN.md](docs/PLAN.md) for the full milestone breakdown.
 
@@ -38,14 +43,16 @@ uv run adscrub ingest                                     # fetch it, upsert epi
 uv run adscrub chapters                                   # scan chapter markers for ad spans
 uv run adscrub transcribe                                 # Whisper the rest
 uv run adscrub detect                                     # LLM ad-span classification
+uv run adscrub cut                                        # ffmpeg out the ad spans
+uv run adscrub serve --base-url http://this-host:8711     # serve the cleaned feed(s)
 uv run adscrub stats                                      # counts
 ```
 
 `detect` needs `$ANTHROPIC_API_KEY` set (get it from rbw, not a file — same
-convention as hark).
-
-`cut` / `serve` are registered subcommands that report "not built yet" until
-their milestones land — see docs/PLAN.md.
+convention as hark). `serve`'s `--base-url` must be wherever the podcast player can
+actually reach this host — it's embedded in every generated audio link, so
+`localhost` only works if the player runs on the same machine (it prints a warning
+if left at that default).
 
 Transcription runs CPU-only by default. `code` does have a real GPU (RTX 2070
 SUPER) and Docker here has the `nvidia` runtime registered, but that's only wired

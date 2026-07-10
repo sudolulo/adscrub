@@ -63,15 +63,22 @@ a distinct auth/web layer, deployment identity, or feed-registration UX that wou
 just get thrown away on merge) — keep it a thin CLI + SQLite + pipeline, matching
 hark's own M0/M1 shape, so a later merge is a module import, not a rewrite.
 
+The full pipeline (ingest → chapters → transcribe → detect → cut → serve) is now
+built end-to-end as of 0.4.0, which is exactly the trigger PLAN.md's M5 names for
+actually making the merge-or-stay-standalone call — **that's the owner's decision, not
+something to resolve unprompted.** Don't preemptively start merging repos.
+
 ## Conventions
 
 - Python 3.12+, `uv` + `pyproject.toml`, src layout. SQLite for storage. Keep
-  dependencies minimal; don't add faster-whisper/torch etc. until M2 actually needs them.
+  dependencies minimal — GPU runtime libs are an optional `gpu` extra rather than a
+  base dependency (see M2), and there's no torch dependency anywhere (CUDA detection
+  goes through `ctranslate2.get_cuda_device_count()` instead).
 - CHANGELOG.md in Keep a Changelog format; SemVer.
 - **No AI/Claude attribution in commit messages** (no Co-Authored-By). Disclose AI use
   in the README instead. Commit messages describe actual changes, concise; never
   reference prompts or instructions.
-- Significant multi-commit features go on a feature branch; small increments can go on
-  main while the project is pre-0.1.
+- Significant multi-commit features go on a feature branch; small increments are fine
+  directly on main.
 - Remote: private Gitea repo `flan/adscrub` (origin, SSH). Do not create additional
   remotes or mirrors unprompted.

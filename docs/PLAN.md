@@ -57,27 +57,44 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
   Same fix applied to M1's `chapters_scanned_at` for the same reason (a free
   HTTP re-fetch, not a billing bug, but the same defect class).
 
-## M4 — cut + re-hosted feed
+## M4 — cut + re-hosted feed (done, 0.4.0)
 
-- `ffmpeg` extraction of the surviving (non-ad) spans, concat back together, write to
-  `episodes.cut_path`.
-- `feedgen`-based feed regeneration: same episodes, `cut_path` audio instead of the
-  original `audio_url`, served over HTTP. This is the only integration point any
-  podcast player needs — subscribe to this feed's URL instead of the original.
-- Docker deploy on TrueNAS, same shape as hark/tiltmeter (scheduled ingest → pipeline →
-  serve), once the pipeline actually produces something worth deploying.
+- `ffmpeg` extraction of the surviving (non-ad) spans (`cut.compute_keep_spans` merges
+  overlapping ad_segments from any source, then takes the complement), concat back
+  together via the concat demuxer (`-c copy` — no re-encode, no quality loss), write to
+  `episodes.cut_path`. Episode duration comes from `ffprobe` on the actual downloaded
+  file, not RSS metadata (which is often wrong/missing).
+- `feedgen`-based feed regeneration (`adscrub serve`, stdlib `http.server` — dependency
+  -free by design, same as hark's web.py): `GET /feed/<feed_id>` regenerates the RSS
+  live from the DB on every request; episodes with a `cut_path` point at
+  `/audio/<id>.<ext>` (served from `data/cut/`), everything else still points straight
+  at its original `audio_url` — an episode nobody's cut (no ads found, or not
+  processed yet) needs no local copy at all. This is the only integration point any
+  podcast player needs — subscribe to `/feed/<id>` instead of the original feed URL.
+- No login wall on the server (unlike hark's dashboard) — this is a machine-consumed
+  feed on a trusted homelab network, not a browsable UI over someone's listening
+  habits. Revisit if it ever needs to be reachable from outside a trusted network.
+- Docker: default `CMD` now runs `adscrub serve` (long-running, port 8711, matching
+  hark/tiltmeter's shape); pipeline stages stay one-shot `docker compose run --rm`
+  commands. `$ADSCRUB_BASE_URL` must be set to wherever the podcast player can actually
+  reach the container — `serve` prints a warning if left at the `localhost` default.
 
 ## M5 — hark module decision
 
-- Once M4 is working end-to-end, decide whether to fold this into `flan/hark` as a
-  module (shared feed-ingest code, one deployed service) or keep it standalone. Don't
-  pre-build shared infrastructure for this before M4 proves the pipeline works —
-  premature merging risks coupling two still-changing pipelines.
+- Now that M4 works end-to-end, the actual decision point: fold this into `flan/hark`
+  as a module (shared feed-ingest code, one deployed service) or keep it standalone?
+  **Owner call, not decided here** — don't pre-build shared infrastructure before this
+  is actually decided.
 
 ## Open questions (owner input needed, don't block on these)
 
+- M5's hark-merge decision (see above).
 - M3 currently defaults to `claude-opus-4-8`; revisit cost vs. accuracy on ad-span
   boundaries once it's run against real transcripts (a cheaper model may be plenty
   for a fairly mechanical "find the sponsor read" task).
 - Real-world validation of the M1 chapters-URL parsing against an actual subscribed
   feed, not just the synthetic test fixture.
+- Real-world end-to-end validation: this has only been tested with synthetic fixtures
+  and mocked ffmpeg/Whisper/Claude calls — actual audio quality/timing accuracy after
+  a real cut, and whether AntennaPod accepts the regenerated feed without complaint,
+  are both unverified.
