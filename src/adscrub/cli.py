@@ -1,4 +1,4 @@
-"""adscrub command line: add-feed, ingest, chapters, stats (transcribe/detect/cut/serve: M2+)."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, stats (detect/cut/serve: M3+)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,12 @@ import sys
 
 import httpx
 
-from . import __version__, chapters, db, ingest
+from . import __version__, chapters, db, ingest, transcribe
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
 
 _NOT_BUILT_YET = {
-    "transcribe": "M2",
     "detect": "M3",
     "cut": "M4",
     "serve": "M4/M5",
@@ -73,6 +72,35 @@ def cmd_chapters(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_transcribe(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = transcribe.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(transcribe.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending transcription", file=sys.stderr)
+        return 1
+
+    errors = 0
+    with make_client() as client:
+        for ep in pending:
+            try:
+                path = transcribe.transcribe_episode(
+                    conn, ep, client, model_size=args.model
+                )
+            except (httpx.HTTPError, OSError) as exc:
+                errors += 1
+                print(f"  FAIL  {ep['title']}: {exc}")
+                continue
+            print(f"  ok    {ep['title']} -> {path}")
+    remaining = len(transcribe.pending_episodes(conn))
+    print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     feeds = conn.execute("SELECT COUNT(*) FROM feeds").fetchone()[0]
@@ -118,6 +146,17 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("chapters", help="scan episodes' existing chapter markers for ad spans")
     p.set_defaults(func=cmd_chapters)
+
+    p = sub.add_parser(
+        "transcribe", help="transcribe episodes with no chapter-sourced ad spans"
+    )
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--model", default=transcribe.DEFAULT_MODEL,
+                   help=f"faster-whisper model size (default: $ADSCRUB_WHISPER_MODEL or "
+                        f"{transcribe.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_transcribe)
 
     p = sub.add_parser("stats", help="print database counts")
     p.set_defaults(func=cmd_stats)

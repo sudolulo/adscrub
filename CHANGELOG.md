@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-10
+
+### Added
+
+- Transcription pipeline (`adscrub transcribe`): downloads episode audio (cached,
+  re-run safe), transcribes with faster-whisper, stores segment timestamps in
+  `data/transcripts/<id>.json`. Skips episodes already covered by a chapter-sourced
+  ad span (M1) or already transcribed.
+- Device auto-detection via `ctranslate2.get_cuda_device_count()` — CUDA float16 if
+  a GPU is visible to the process, CPU int8 otherwise. No config needed; works the
+  same whether run from a plain dev shell or a GPU-enabled Docker deploy.
+- `compose.gpu.yaml` override: requests the host's GPU via the `nvidia` Docker
+  runtime and builds the image with the optional `gpu` extra (cuBLAS/cuDNN).
+
+### Fixed
+
+- CLAUDE.md/docs/PLAN.md previously claimed this host had no GPU at all; corrected
+  — `code` has a physical RTX 2070 SUPER and Docker's `nvidia` runtime is
+  registered. The earlier claim only reflected this interactive dev shell's LXC not
+  having the device nodes passed through, which is a narrower fact.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

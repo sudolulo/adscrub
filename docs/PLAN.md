@@ -20,17 +20,23 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
   Not yet tested against a real-world feed (only a synthetic fixture) — validate against
   an actual subscribed show before trusting this path in production.
 
-## M2 — transcription
+## M2 — transcription (done, 0.2.0)
 
-- Local Whisper (faster-whisper, CPU-first) for episodes with no usable chapters URL,
-  or where the chapters pass found nothing.
-- **Open question:** no CUDA device on `code` (confirmed 2026-07-10 — no `/dev/nvidia*`).
-  Decide whether M2 runs CPU-only here (slow but simple) or ships the transcription
-  step to a different homelab box with real GPU passthrough (adds a network hop and a
-  deployment target, but much faster). Don't guess — benchmark CPU-only first; only
-  build the remote-dispatch option if CPU throughput is actually a problem given
-  realistic episode volume.
-- Store transcript + word/segment timestamps; `episodes.transcript_path`.
+- Local Whisper (faster-whisper) for episodes with no usable chapters URL, or where
+  the chapters pass found nothing (`ad_segments.source = 'chapter'` absent).
+- Downloads episode audio to `data/audio/<id>.mp3` (cached, re-run safe), transcribes,
+  writes segment-level timestamps to `data/transcripts/<id>.json`.
+- **GPU:** `code` physically has an RTX 2070 SUPER and Docker here has the `nvidia`
+  runtime + CDI device registered (confirmed 2026-07-10) — resolved, this is not CPU-only
+  forever. Device selection is automatic at runtime via
+  `ctranslate2.get_cuda_device_count()` (no torch dependency needed just to check): CUDA
+  float16 if a device is visible, CPU int8 otherwise. The interactive dev shell itself
+  doesn't have the device nodes passed through, so plain `uv run adscrub transcribe`
+  here runs CPU — that's expected, not a bug. The Docker deploy path
+  (`compose.gpu.yaml` override) requests the GPU explicitly.
+- GPU runtime libs (cuBLAS/cuDNN) are an optional `gpu` extra
+  (`uv sync --extra gpu`) rather than a base dependency, since they're large,
+  CUDA-specific, and only needed on the deploy target.
 
 ## M3 — LLM ad-span classification
 
@@ -60,8 +66,6 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
 
 ## Open questions (owner input needed, don't block on these)
 
-- GPU/Whisper feasibility: CPU-only on `code`, or dispatch to a box with real
-  passthrough? (M2 decision — see above.)
 - Which Claude model for M3 classification (cost vs. accuracy on ad-span boundaries).
 - Real-world validation of the M1 chapters-URL parsing against an actual subscribed
   feed, not just the synthetic test fixture.

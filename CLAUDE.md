@@ -38,12 +38,17 @@ episode works on any feed, at the cost of real per-episode compute.
   Fingerprinting (à la AdBlockRadio) only catches ads that repeat verbatim; modern
   podcast ads are frequently host-read and/or dynamically inserted per listener, so
   there's often nothing to fingerprint against. Transcribe, then classify the text.
-- **No CUDA device on this host** (`code`, a LAN host — confirmed no `/dev/nvidia*`,
-  no `nvidia-smi`, 2026-07-10) despite Tendril's GPU work happening elsewhere on the
-  fleet. Whisper here means CPU-only inference (int8-quantized small/base model) until
-  proven otherwise on a box with real passthrough. This is the same open question hark's
-  own PLAN.md already flagged and deferred — now empirically confirmed, not just
-  suspected.
+- **GPU is real, just not wired into this interactive shell.** `code` (a LAN host)
+  physically has an RTX 2070 SUPER (`lspci`: NVIDIA TU104), and Docker on this host has
+  the `nvidia` runtime registered plus a CDI spec for `/dev/nvidia0` (confirmed
+  2026-07-10) — so a container run with GPU passthrough requested (`--gpus`/CDI device)
+  gets real CUDA. The interactive dev LXC this Claude session runs in just doesn't have
+  the device nodes passed to *it*, which is a different, narrower fact than "no GPU on
+  this host" (an earlier version of this note wrongly conflated the two — don't repeat
+  that mistake). Transcription code must not hard-require CUDA either way: detect it at
+  runtime (`ctranslate2.get_cuda_device_count()`, no torch needed) and fall back to CPU
+  int8 cleanly, since the CLI itself may still run outside GPU passthrough (e.g. ad hoc
+  from a dev shell) even when the Docker deploy target has it.
 - Integration output is a regenerated RSS feed, same pattern as hark: the player
   subscribes to it like any podcast, zero app-side changes.
 

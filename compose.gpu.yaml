@@ -1,0 +1,18 @@
+# GPU override: requests the host's RTX 2070 SUPER via the nvidia Docker runtime
+# (confirmed registered on `code`, 2026-07-10 — see CLAUDE.md) and builds the image
+# with the cuBLAS/cuDNN extra so faster-whisper actually uses it.
+#
+#   docker compose -f compose.yaml -f compose.gpu.yaml build
+#   docker compose -f compose.yaml -f compose.gpu.yaml run --rm adscrub transcribe
+services:
+  adscrub:
+    build:
+      args:
+        GPU: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]

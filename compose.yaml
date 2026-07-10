@@ -2,6 +2,7 @@
 #   docker compose run --rm adscrub add-feed https://feeds.example.com/show
 #   docker compose run --rm adscrub ingest
 #   docker compose run --rm adscrub chapters
+#   docker compose run --rm adscrub transcribe   # CPU by default — see compose.gpu.yaml
 #   docker compose run --rm adscrub stats
 services:
   adscrub:
