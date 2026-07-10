@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0">
+<channel>
+<title>Example Show</title>
+<description>A show for tests.</description>
+<image><url>https://example.com/art.png</url></image>
+<item>
+  <title>Episode 1: With chapters</title>
+  <guid>ep-001</guid>
+  <description>Has a chapters URL.</description>
+  <pubDate>Thu, 01 Jan 2026 06:00:00 GMT</pubDate>
+  <itunes:duration>01:02:03</itunes:duration>
+  <podcast:chapters url="https://example.com/ep1-chapters.json" type="application/json+chapters"/>
+  <enclosure url="https://example.com/audio/ep1.mp3" type="audio/mpeg" length="123"/>
+</item>
+<item>
+  <title>Episode 2: No chapters</title>
+  <guid>ep-002</guid>
+  <description>No chapters URL at all.</description>
+  <pubDate>Fri, 02 Jan 2026 06:00:00 GMT</pubDate>
+  <itunes:duration>45:00</itunes:duration>
+  <enclosure url="https://example.com/audio/ep2.mp3" type="audio/mpeg" length="456"/>
+</item>
+</channel>
+</rss>

@@ -1,0 +1,11 @@
+# Pipeline one-shot commands. No web frontend yet (see docs/PLAN.md M4).
+#   docker compose run --rm adscrub add-feed https://feeds.example.com/show
+#   docker compose run --rm adscrub ingest
+#   docker compose run --rm adscrub chapters
+#   docker compose run --rm adscrub stats
+services:
+  adscrub:
+    build: .
+    image: adscrub:latest
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,209 @@
+"""RSS ingest: fetch a proxied feed, parse episodes, upsert into SQLite.
+
+Re-runs are idempotent: unchanged episodes are left alone, changed ones are
+updated in place, new ones inserted. Episodes are keyed by (feed_id, guid).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from dataclasses import dataclass
+
+import feedparser
+import httpx
+
+from .db import utcnow
+
+# Fields compared to decide whether an existing episode row needs an update.
+_EPISODE_FIELDS = ("title", "description", "pubdate", "duration_seconds", "audio_url",
+                   "chapters_url")
+
+
+@dataclass
+class ParsedEpisode:
+    guid: str
+    title: str | None
+    description: str | None
+    pubdate: str | None
+    duration_seconds: int | None
+    audio_url: str | None
+    chapters_url: str | None
+
+
+@dataclass
+class ParsedFeed:
+    title: str | None
+    description: str | None
+    image_url: str | None
+    episodes: list[ParsedEpisode]
+
+
+@dataclass
+class IngestResult:
+    feed_id: int
+    source_url: str
+    inserted: int = 0
+    updated: int = 0
+    total: int = 0
+    error: str | None = None
+
+
+def parse_duration(value) -> int | None:
+    """Parse itunes:duration — plain seconds, MM:SS, or HH:MM:SS."""
+    if value is None:
+        return None
+    parts = str(value).strip().split(":")
+    try:
+        nums = [int(float(p)) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    return None
+
+
+def _audio_url(entry) -> str | None:
+    for enclosure in entry.get("enclosures", []):
+        href = enclosure.get("href")
+        mime = enclosure.get("type") or ""
+        if href and (not mime or mime.startswith("audio/")):
+            return href
+    return None
+
+
+def _pubdate(entry) -> str | None:
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", parsed)
+    return None
+
+
+def _chapters_url(entry) -> str | None:
+    """Podcasting 2.0 <podcast:chapters url="..."/> if the feed declares it.
+
+    Verified against feedparser 6.x: it exposes elements from namespaces it
+    doesn't recognize under a key built from the document's own prefix, so a
+    feed using the conventional "podcast" prefix lands in entry["podcast_chapters"]
+    as {"url": ..., "type": ...}. A feed using a different prefix for the same
+    namespace URI would need a fallback here — not yet hit in practice.
+    """
+    chapters = entry.get("podcast_chapters")
+    if isinstance(chapters, dict):
+        return chapters.get("url") or chapters.get("href")
+    return None
+
+
+def parse_feed(content: bytes | str) -> ParsedFeed:
+    parsed = feedparser.parse(content)
+    episodes = []
+    for entry in parsed.entries:
+        audio_url = _audio_url(entry)
+        guid = entry.get("id") or audio_url or entry.get("link")
+        if not guid:
+            continue
+        episodes.append(
+            ParsedEpisode(
+                guid=guid,
+                title=entry.get("title"),
+                description=entry.get("summary"),
+                pubdate=_pubdate(entry),
+                duration_seconds=parse_duration(entry.get("itunes_duration")),
+                audio_url=audio_url,
+                chapters_url=_chapters_url(entry),
+            )
+        )
+    feed = parsed.feed
+    return ParsedFeed(
+        title=feed.get("title"),
+        description=feed.get("description") or feed.get("subtitle"),
+        image_url=feed.get("image", {}).get("href"),
+        episodes=episodes,
+    )
+
+
+def add_feed(conn: sqlite3.Connection, source_url: str) -> sqlite3.Row:
+    """Register a source feed to proxy. No-op (returns existing row) if already added."""
+    conn.execute(
+        "INSERT INTO feeds (source_url) VALUES (?) ON CONFLICT (source_url) DO NOTHING",
+        (source_url,),
+    )
+    conn.commit()
+    return conn.execute("SELECT * FROM feeds WHERE source_url = ?", (source_url,)).fetchone()
+
+
+def upsert_episodes(
+    conn: sqlite3.Connection, feed_id: int, episodes: list[ParsedEpisode]
+) -> tuple[int, int]:
+    """Insert new episodes, update changed ones. Returns (inserted, updated)."""
+    existing = {
+        row["guid"]: row
+        for row in conn.execute("SELECT * FROM episodes WHERE feed_id = ?", (feed_id,))
+    }
+    inserted = updated = 0
+    seen: set[str] = set()
+    for ep in episodes:
+        if ep.guid in seen:
+            continue
+        seen.add(ep.guid)
+        row = existing.get(ep.guid)
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO episodes
+                    (feed_id, guid, title, description, pubdate, duration_seconds,
+                     audio_url, chapters_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (feed_id, ep.guid, ep.title, ep.description, ep.pubdate,
+                 ep.duration_seconds, ep.audio_url, ep.chapters_url),
+            )
+            inserted += 1
+        elif any(row[field] != getattr(ep, field) for field in _EPISODE_FIELDS):
+            conn.execute(
+                """
+                UPDATE episodes
+                SET title = ?, description = ?, pubdate = ?, duration_seconds = ?,
+                    audio_url = ?, chapters_url = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (ep.title, ep.description, ep.pubdate, ep.duration_seconds,
+                 ep.audio_url, ep.chapters_url, utcnow(), row["id"]),
+            )
+            updated += 1
+    return inserted, updated
+
+
+def ingest_feed(conn: sqlite3.Connection, client: httpx.Client, feed: sqlite3.Row) -> IngestResult:
+    result = IngestResult(feed_id=feed["id"], source_url=feed["source_url"])
+    try:
+        resp = client.get(feed["source_url"])
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        result.error = str(exc)
+        return result
+    parsed = parse_feed(resp.content)
+    result.inserted, result.updated = upsert_episodes(conn, feed["id"], parsed.episodes)
+    result.total = len(parsed.episodes)
+    conn.execute(
+        """
+        UPDATE feeds
+        SET title = COALESCE(?, title),
+            description = COALESCE(?, description),
+            image_url = COALESCE(?, image_url),
+            last_fetched_at = ?
+        WHERE id = ?
+        """,
+        (parsed.title, parsed.description, parsed.image_url, utcnow(), feed["id"]),
+    )
+    conn.commit()
+    return result
+
+
+def ingest_all(conn: sqlite3.Connection, client: httpx.Client) -> list[IngestResult]:
+    feeds = conn.execute("SELECT * FROM feeds ORDER BY id").fetchall()
+    return [ingest_feed(conn, client, feed) for feed in feeds]
