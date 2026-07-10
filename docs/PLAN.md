@@ -38,14 +38,24 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
   (`uv sync --extra gpu`) rather than a base dependency, since they're large,
   CUDA-specific, and only needed on the deploy target.
 
-## M3 — LLM ad-span classification
+## M3 — LLM ad-span classification (done, 0.3.0)
 
 - Send the timestamped transcript to a Claude model (reuse hark's
-  `$ANTHROPIC_API_KEY`-from-rbw pattern, not a file). Ask it to flag spans matching
-  host-read ad patterns: "brought to you by", promo codes, URL drops, tone/topic shift.
-- Store spans in `ad_segments` with `source='llm'`; keep chapter-sourced spans too
-  (dedup/precedence is a pipeline decision, not a schema one — don't drop lower-confidence
-  sources, prefer/override at cut time).
+  `$ANTHROPIC_API_KEY`-from-rbw pattern, not a file) via structured outputs
+  (`messages.parse`, same idiom as hark's `ClaudeExtractor`). The model points at
+  *segment indices*, not raw seconds — LLMs are unreliable at reproducing exact
+  floating-point timestamps from memory but reliable at picking from a numbered
+  list — and indices are mapped back to the transcript's own timestamps, so a
+  stored span is always grounded in what Whisper actually produced.
+- Store spans in `ad_segments` with `source='llm'` and a `reason` (why the model
+  flagged it — auditability, same ethos as tiltmeter). Keep chapter-sourced spans
+  too (dedup/precedence is a pipeline decision, not a schema one — don't drop
+  lower-confidence sources, prefer/override at cut time).
+- Completion is tracked via `episodes.llm_detected_at`, set even when zero spans
+  are found — this fixed a real bug caught by the test suite: without it,
+  ad-free episodes got silently re-sent to the LLM (and re-billed) on every run.
+  Same fix applied to M1's `chapters_scanned_at` for the same reason (a free
+  HTTP re-fetch, not a billing bug, but the same defect class).
 
 ## M4 — cut + re-hosted feed
 
@@ -66,6 +76,8 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
 
 ## Open questions (owner input needed, don't block on these)
 
-- Which Claude model for M3 classification (cost vs. accuracy on ad-span boundaries).
+- M3 currently defaults to `claude-opus-4-8`; revisit cost vs. accuracy on ad-span
+  boundaries once it's run against real transcripts (a cheaper model may be plenty
+  for a fairly mechanical "find the sponsor read" task).
 - Real-world validation of the M1 chapters-URL parsing against an actual subscribed
   feed, not just the synthetic test fixture.

@@ -85,7 +85,7 @@ def transcribe_episode(
     transcript_path.write_text(json.dumps(transcript, indent=2))
 
     conn.execute(
-        "UPDATE episodes SET transcript_path = ?, status = 'transcribed', updated_at = ? WHERE id = ?",
+        "UPDATE episodes SET transcript_path = ?, updated_at = ? WHERE id = ?",
         (str(transcript_path), utcnow(), episode["id"]),
     )
     conn.commit()

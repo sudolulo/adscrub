@@ -17,11 +17,12 @@ on, and a feed-level proxy works with any podcast app, not just one.
 3. **Transcribe** (done) — for episodes with no usable chapter markers, download
    the audio and transcribe locally with Whisper (faster-whisper; CUDA if a GPU is
    visible to the process, CPU int8 otherwise — auto-detected, no config needed).
-4. **Detect** (not built — M3) — classify ad spans from the transcript via an LLM
-   call (host-read ad patterns: "brought to you by", promo codes, URL drops, tone
+4. **Detect** (done) — classify ad spans from the transcript via a Claude model
+   (host-read ad patterns: "brought to you by", promo codes, URL drops, tone
    shift) — this matters because modern ads are often host-read and unique per
    episode/listener, so a fingerprint/crowdsourced-timestamp database (SponsorBlock
-   style) can't catch them.
+   style) can't catch them. The model points at transcript segment indices, not
+   raw timestamps, so stored spans are always grounded in Whisper's own output.
 5. **Cut** (not built — M4) — `ffmpeg` out the ad spans, write the clean audio.
 6. **Serve** (not built — M4/M5) — re-host a cleaned RSS feed pointing at the cut
    audio; this is the only thing the podcast player ever sees.
@@ -36,11 +37,15 @@ uv run adscrub add-feed https://feeds.example.com/show   # register a feed to pr
 uv run adscrub ingest                                     # fetch it, upsert episodes
 uv run adscrub chapters                                   # scan chapter markers for ad spans
 uv run adscrub transcribe                                 # Whisper the rest
+uv run adscrub detect                                     # LLM ad-span classification
 uv run adscrub stats                                      # counts
 ```
 
-`detect` / `cut` / `serve` are registered subcommands that report "not built yet"
-until their milestones land — see docs/PLAN.md.
+`detect` needs `$ANTHROPIC_API_KEY` set (get it from rbw, not a file — same
+convention as hark).
+
+`cut` / `serve` are registered subcommands that report "not built yet" until
+their milestones land — see docs/PLAN.md.
 
 Transcription runs CPU-only by default. `code` does have a real GPU (RTX 2070
 SUPER) and Docker here has the `nvidia` runtime registered, but that's only wired

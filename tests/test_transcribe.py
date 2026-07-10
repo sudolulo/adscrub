@@ -88,9 +88,8 @@ def test_transcribe_episode_writes_transcript_and_updates_row(conn, tmp_path, mo
         {"start": 5.0, "end": 8.0, "text": "This is an ad"},
     ]
 
-    row = conn.execute("SELECT transcript_path, status FROM episodes WHERE id = ?", (ep["id"],)).fetchone()
+    row = conn.execute("SELECT transcript_path FROM episodes WHERE id = ?", (ep["id"],)).fetchone()
     assert row["transcript_path"] == str(path)
-    assert row["status"] == "transcribed"
 
 
 # --- pending_episodes ---

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-10
+
+### Added
+
+- LLM ad-span classification (`adscrub detect`): sends each episode's transcript
+  to a Claude model (structured outputs, `claude-opus-4-8` default) which flags
+  ad spans by segment index rather than raw timestamps — indices are mapped back
+  to the transcript's own timestamps, so stored spans are always grounded in what
+  Whisper actually produced. Stores a `reason` alongside each `ad_segments` row
+  for auditability.
+- `episodes.chapters_scanned_at` / `episodes.llm_detected_at` timestamp columns,
+  replacing the old free-text `status` column, to track per-stage completion.
+
+### Fixed
+
+- Episodes with zero ad spans found (chapters or LLM) were never marked done,
+  so they'd be redundantly rescanned/re-sent-to-the-LLM on every run — caught by
+  a test written for the zero-spans case. Now every processed episode is marked
+  complete regardless of what it found.
+
 ## [0.2.0] - 2026-07-10
 
 ### Added

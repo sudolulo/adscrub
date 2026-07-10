@@ -13,6 +13,8 @@ import sqlite3
 
 import httpx
 
+from .db import utcnow
+
 _AD_KEYWORDS = re.compile(
     r"\b(ad|ads|advert|advertisement|sponsor|sponsors|sponsored|promo)\b", re.IGNORECASE
 )
@@ -53,8 +55,19 @@ def ad_spans_from_chapters(chapters: list[dict], episode_duration: float | None 
     return spans
 
 
+def pending_episodes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Episodes with a chapters URL that haven't been scanned yet."""
+    return conn.execute(
+        "SELECT * FROM episodes WHERE chapters_url IS NOT NULL AND chapters_scanned_at IS NULL"
+    ).fetchall()
+
+
 def scan_episode(conn: sqlite3.Connection, client: httpx.Client, episode: sqlite3.Row) -> int:
-    """Fetch chapters for one episode and store any ad spans found. Returns count stored."""
+    """Fetch chapters for one episode and store any ad spans found. Returns count stored.
+
+    Marks the episode scanned even when zero ad chapters are found — otherwise
+    a show with no ad-tagged chapters gets its chapters JSON re-fetched forever.
+    """
     if not episode["chapters_url"]:
         return 0
     chapters = fetch_chapters(client, episode["chapters_url"])
@@ -67,9 +80,8 @@ def scan_episode(conn: sqlite3.Connection, client: httpx.Client, episode: sqlite
             """,
             (episode["id"], start, end),
         )
-    if spans:
-        conn.execute(
-            "UPDATE episodes SET status = 'chapters_scanned' WHERE id = ?", (episode["id"],)
-        )
+    conn.execute(
+        "UPDATE episodes SET chapters_scanned_at = ? WHERE id = ?", (utcnow(), episode["id"])
+    )
     conn.commit()
     return len(spans)

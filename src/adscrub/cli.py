@@ -1,4 +1,4 @@
-"""adscrub command line: add-feed, ingest, chapters, transcribe, stats (detect/cut/serve: M3+)."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, detect, stats (cut/serve: M4+)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,12 @@ import sys
 
 import httpx
 
-from . import __version__, chapters, db, ingest, transcribe
+from . import __version__, chapters, db, detect, ingest, transcribe
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
 
 _NOT_BUILT_YET = {
-    "detect": "M3",
     "cut": "M4",
     "serve": "M4/M5",
 }
@@ -52,9 +51,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_chapters(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    episodes = conn.execute(
-        "SELECT * FROM episodes WHERE chapters_url IS NOT NULL AND status = 'new'"
-    ).fetchall()
+    episodes = chapters.pending_episodes(conn)
     if not episodes:
         print("no episodes with an unscanned chapters_url", file=sys.stderr)
         return 1
@@ -98,6 +95,43 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             print(f"  ok    {ep['title']} -> {path}")
     remaining = len(transcribe.pending_episodes(conn))
     print(f"transcribed {len(pending) - errors} episode(s) ({errors} failed, {remaining} still pending)")
+    return 1 if errors else 0
+
+
+def cmd_detect(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    pending = detect.pending_episodes(conn, args.limit)
+    if args.dry_run:
+        total_pending = len(detect.pending_episodes(conn))
+        print(f"pending episodes: {total_pending}"
+              + (f" (would process {len(pending)} this run)" if args.limit else ""))
+        return 0
+    if not pending:
+        print("no episodes pending ad-span detection", file=sys.stderr)
+        return 1
+
+    import anthropic  # deferred: other commands must work without a key
+
+    try:
+        client = anthropic.Anthropic()
+    except anthropic.AnthropicError as exc:
+        print(f"anthropic client: {exc}", file=sys.stderr)
+        print("hint: export ANTHROPIC_API_KEY first (it lives in rbw, not in a file)",
+              file=sys.stderr)
+        return 1
+
+    detector = detect.ClaudeAdDetector(client, model=args.model)
+
+    def report(r: detect.DetectResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}")
+        else:
+            print(f"  ok    {r.title}: {r.found} ad span(s) from transcript")
+
+    results = detect.detect_pending(conn, detector, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    remaining = len(detect.pending_episodes(conn))
+    print(f"detected across {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
 
@@ -157,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("detect", help="classify ad spans from transcripts with a Claude model")
+    p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--model", default=detect.DEFAULT_MODEL,
+                   help=f"Claude model id (default: {detect.DEFAULT_MODEL})")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report how many episodes are pending")
+    p.set_defaults(func=cmd_detect)
 
     p = sub.add_parser("stats", help="print database counts")
     p.set_defaults(func=cmd_stats)

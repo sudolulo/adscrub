@@ -58,11 +58,31 @@ def test_scan_episode_stores_ad_segments(conn, fixtures):
         (3600.0, 3660.0, "chapter"),
     ]
 
-    status = conn.execute("SELECT status FROM episodes WHERE id = ?", (ep["id"],)).fetchone()[0]
-    assert status == "chapters_scanned"
+    scanned_at = conn.execute(
+        "SELECT chapters_scanned_at FROM episodes WHERE id = ?", (ep["id"],)
+    ).fetchone()[0]
+    assert scanned_at is not None
 
 
 def test_scan_episode_skips_when_no_chapters_url(conn):
     ep = conn.execute("SELECT * FROM episodes WHERE guid = 'ep-002'").fetchone()
     n = chapters.scan_episode(conn, httpx.Client(), ep)
     assert n == 0
+
+
+def test_scan_episode_marks_scanned_even_with_zero_ad_chapters(conn):
+    """Regression: an episode with chapters but no ad-keyword ones must still be
+    marked scanned, or its chapters JSON gets re-fetched forever."""
+    ep = conn.execute("SELECT * FROM episodes WHERE guid = 'ep-001'").fetchone()
+
+    def handler(request):
+        return httpx.Response(200, json={"chapters": [{"startTime": 0, "title": "Intro"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        n = chapters.scan_episode(conn, client, ep)
+    assert n == 0
+    scanned_at = conn.execute(
+        "SELECT chapters_scanned_at FROM episodes WHERE id = ?", (ep["id"],)
+    ).fetchone()[0]
+    assert scanned_at is not None
+    assert chapters.pending_episodes(conn) == []

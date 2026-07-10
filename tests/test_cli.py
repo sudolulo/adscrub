@@ -1,4 +1,6 @@
-from adscrub import cli, db, transcribe
+import json
+
+from adscrub import cli, db, detect, transcribe
 
 
 def test_add_feed_then_stats(tmp_path, capsys):
@@ -37,7 +39,7 @@ def test_chapters_with_nothing_to_scan_fails(tmp_path, capsys):
 
 def test_not_built_yet_commands_report_milestone(tmp_path, capsys):
     for name, milestone in [
-        ("detect", "M3"), ("cut", "M4"), ("serve", "M4/M5"),
+        ("cut", "M4"), ("serve", "M4/M5"),
     ]:
         rc = cli.main(["--db", str(tmp_path / "t.db"), name])
         assert rc == 1
@@ -73,8 +75,7 @@ def test_transcribe_success_path(tmp_path, capsys, monkeypatch):
 
     def fake_transcribe_episode(conn, ep, client, model_size=None):
         conn.execute(
-            "UPDATE episodes SET transcript_path = 'x.json', status = 'transcribed' WHERE id = ?",
-            (ep["id"],),
+            "UPDATE episodes SET transcript_path = 'x.json' WHERE id = ?", (ep["id"],)
         )
         conn.commit()
         return "x.json"
@@ -86,6 +87,67 @@ def test_transcribe_success_path(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "ok    Ep One -> x.json" in out
     assert "transcribed 1 episode(s) (0 failed, 0 still pending)" in out
+
+
+def test_detect_with_nothing_pending_fails(tmp_path, capsys):
+    rc = cli.main(["--db", str(tmp_path / "t.db"), "detect"])
+    assert rc == 1
+    assert "no episodes pending" in capsys.readouterr().err
+
+
+def test_detect_dry_run_reports_pending(tmp_path, capsys):
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps([{"start": 0.0, "end": 1.0, "text": "hi"}]))
+    conn = db.connect(path)
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.execute(
+        "INSERT INTO episodes (feed_id, guid, title, transcript_path) VALUES (1, 'g1', 'ep', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = cli.main(["--db", str(path), "detect", "--dry-run"])
+    assert rc == 0
+    assert "pending episodes: 1" in capsys.readouterr().out
+
+
+def test_detect_success_path(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "t.db"
+    transcript_path = tmp_path / "t.json"
+    transcript_path.write_text(json.dumps(
+        [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 5.0, "end": 8.0, "text": "ad"}]
+    ))
+    conn = db.connect(path)
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.execute(
+        "INSERT INTO episodes (feed_id, guid, title, transcript_path) VALUES (1, 'g1', 'Ep One', ?)",
+        (str(transcript_path),),
+    )
+    conn.commit()
+    conn.close()
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            class Response:
+                parsed_output = detect._Detection(
+                    ad_spans=[detect._Span(start_segment=1, end_segment=1, reason="ad")]
+                )
+            return Response()
+
+    class FakeAnthropic:
+        def __init__(self):
+            self.messages = FakeMessages()
+
+    import anthropic
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+
+    rc = cli.main(["--db", str(path), "detect"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ok    Ep One: 1 ad span(s) from transcript" in out
+    assert "detected across 1 episode(s) (0 failed, 0 still pending)" in out
 
 
 def test_version(capsys):

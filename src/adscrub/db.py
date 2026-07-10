@@ -20,22 +20,26 @@ CREATE TABLE IF NOT EXISTS feeds (
     updated_at      TEXT
 );
 
+-- Pipeline stage completion is tracked by dedicated *_at timestamps (one per
+-- stage), not a single free-text status — a stage that ran and found nothing
+-- (no ad chapters, no LLM-flagged spans) still has to be marked done, or it
+-- gets redundantly (and for the LLM stage, expensively) re-run forever.
 CREATE TABLE IF NOT EXISTS episodes (
-    id               INTEGER PRIMARY KEY,
-    feed_id          INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
-    guid             TEXT NOT NULL,
-    title            TEXT,
-    description      TEXT,
-    pubdate          TEXT,
-    duration_seconds INTEGER,
-    audio_url        TEXT,
-    chapters_url     TEXT,
-    status           TEXT NOT NULL DEFAULT 'new',
-    local_path       TEXT,
-    transcript_path  TEXT,
-    cut_path         TEXT,
-    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at       TEXT,
+    id                   INTEGER PRIMARY KEY,
+    feed_id              INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+    guid                 TEXT NOT NULL,
+    title                TEXT,
+    description          TEXT,
+    pubdate              TEXT,
+    duration_seconds     INTEGER,
+    audio_url            TEXT,
+    chapters_url         TEXT,
+    chapters_scanned_at  TEXT,
+    transcript_path      TEXT,
+    llm_detected_at      TEXT,
+    cut_path             TEXT,
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at           TEXT,
     UNIQUE (feed_id, guid)
 );
 
@@ -49,6 +53,7 @@ CREATE TABLE IF NOT EXISTS ad_segments (
     end_second   REAL NOT NULL,
     source       TEXT NOT NULL,
     confidence   REAL,
+    reason       TEXT,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
