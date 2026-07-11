@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `detect.detect_episode(conn, episode, detector)`: the per-episode step
+  extracted out of `detect_pending`'s loop body, matching `transcribe_episode`/
+  `cut_episode`'s existing shape (detect.py was the odd one out, only exposing
+  the bulk `detect_pending` and a private `_store`). Lets a caller build its
+  own pending-episode selection instead of going through `pending_episodes()`
+  — needed by hark's per-show ad-stripping toggle. `detect_pending` now calls
+  it internally; behavior unchanged.
+
 ### Fixed
 
 - `__version__` in `src/adscrub/__init__.py` was stuck at 0.1.0 across every

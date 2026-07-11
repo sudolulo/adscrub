@@ -153,6 +153,21 @@ def _store(conn: sqlite3.Connection, episode_id: int, spans: list[DetectedAdSpan
     )
 
 
+def detect_episode(conn: sqlite3.Connection, episode: sqlite3.Row, detector: AdSpanDetector) -> int:
+    """Detect ad spans in one episode's transcript and store them. Returns count found.
+
+    Public so callers can build their own pending-episode selection (e.g. hark
+    filtering by its own per-show config) instead of going through
+    detect_pending's built-in pending_episodes() query.
+    """
+    with open(episode["transcript_path"], encoding="utf-8") as fh:
+        transcript = json.load(fh)
+    spans = detector.detect(transcript)
+    _store(conn, episode["id"], spans)
+    conn.commit()
+    return len(spans)
+
+
 def detect_pending(
     conn: sqlite3.Connection,
     detector: AdSpanDetector,
@@ -170,12 +185,7 @@ def detect_pending(
     for row in pending_episodes(conn, limit):
         result = DetectResult(episode_id=row["id"], title=row["title"] or "")
         try:
-            with open(row["transcript_path"], encoding="utf-8") as fh:
-                transcript = json.load(fh)
-            spans = detector.detect(transcript)
-            _store(conn, row["id"], spans)
-            conn.commit()
-            result.found = len(spans)
+            result.found = detect_episode(conn, row, detector)
             consecutive_errors = 0
         except Exception as exc:  # noqa: BLE001 — per-episode isolation, abort on streaks
             conn.rollback()
