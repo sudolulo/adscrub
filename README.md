@@ -72,13 +72,16 @@ Tests use local feed fixtures — no network.
 
 ## Relationship to hark
 
-This may end up merged into [hark](https://git.onetick.ninja/flan/hark) as a
-module rather than staying a permanently separate service — both projects fetch
-feeds, upsert episodes into SQLite, and re-host derived RSS feeds for the same
-AntennaPod-stays-unmodified loop. Kept separate for now since the two pipelines
-(topic extraction vs. audio transcription/cutting) don't share much code yet;
-don't over-invest in infrastructure that would need to be thrown away if they
-merge later.
+Resolved 2026-07-11 (see M5 in docs/PLAN.md): this stays a separate product.
+[hark](https://git.onetick.ninja/flan/hark) depends on it as a library (a `uv`
+path dependency, editable) rather than folding its source in — hark's own
+`episodes`/`ad_segments` schema was shaped to match this project's, so
+adscrub's schema-coupled functions (`pending_episodes`, `transcribe_episode`,
+`detect_pending`, `cut_pending`, ...) work unchanged against hark's database.
+`hark chapters`/`transcribe`/`detect-ads`/`cut` are thin CLI wrappers around
+this package. An earlier pass at the merge fully copied this source into
+`src/hark/`, which was the wrong shape and got reverted — see hark's
+CHANGELOG 0.4.0.
 
 ## AI use disclosure
 

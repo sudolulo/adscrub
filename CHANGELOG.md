@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `__version__` in `src/adscrub/__init__.py` was stuck at 0.1.0 across every
+  milestone release since `pyproject.toml`'s version was bumped each time but
+  this constant never was — the CLI's `--version` and every outbound
+  User-Agent header have claimed to be `adscrub/0.1.0` this whole time.
+- `test_cut_pending_isolates_per_episode_failures` matched a substring ("2")
+  against the full audio file path to distinguish episode 2's failure from
+  episode 1 — but pytest's auto-numbered `tmp_path` ("pytest-26", "pytest-102",
+  ...) can itself contain that digit, making the test flaky depending on run
+  order. Now matches the deterministic filename (episode id) instead.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added

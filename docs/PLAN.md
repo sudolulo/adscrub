@@ -79,16 +79,25 @@ Milestones. Each one ships something usable and gets a CHANGELOG version.
   commands. `$ADSCRUB_BASE_URL` must be set to wherever the podcast player can actually
   reach the container — `serve` prints a warning if left at the `localhost` default.
 
-## M5 — hark module decision
+## M5 — hark module decision (resolved 2026-07-11)
 
-- Now that M4 works end-to-end, the actual decision point: fold this into `flan/hark`
-  as a module (shared feed-ingest code, one deployed service) or keep it standalone?
-  **Owner call, not decided here** — don't pre-build shared infrastructure before this
-  is actually decided.
+- Decision: stays a separate product. `flan/hark` depends on this repo as a library
+  (`uv` path dependency, editable), not a source merge — hark's schema was shaped to
+  match this one so adscrub's schema-coupled functions work unchanged against hark's
+  database. `hark chapters`/`transcribe`/`detect-ads`/`cut` are thin CLI wrappers that
+  call straight into this package.
+- An earlier pass in the same session fully copied this source into `src/hark/`
+  (wrong shape — two products' worth of code entangled in one), pushed to hark's
+  main, then reverted via `git revert -m 1` once caught. See hark's CHANGELOG 0.4.0
+  for the full story.
+- Practical effect on this repo: still developed and versioned independently, own
+  CHANGELOG/SemVer, own test suite. hark's Docker build doesn't yet resolve the path
+  dependency (build context only has hark's own files) — a packaging gap noted in
+  hark's own docs/PLAN.md, not this repo's problem to solve.
 
 ## Open questions (owner input needed, don't block on these)
 
-- M5's hark-merge decision (see above).
+- ~~M5's hark-merge decision~~ Resolved 2026-07-11 (see above).
 - M3 currently defaults to `claude-opus-4-8`; revisit cost vs. accuracy on ad-span
   boundaries once it's run against real transcripts (a cheaper model may be plenty
   for a fairly mechanical "find the sponsor read" task).

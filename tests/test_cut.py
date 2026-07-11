@@ -172,7 +172,12 @@ def test_cut_pending_isolates_per_episode_failures(conn, tmp_path, monkeypatch):
     conn.commit()
 
     def fake_probe_duration(path):
-        if "2" in str(path):
+        # Match the episode-2 audio file by its deterministic name
+        # (data_dir/audio/<episode_id>.mp3), not a substring of the full
+        # path — tmp_path itself is pytest's auto-numbered temp dir
+        # ("pytest-26", "pytest-102", ...) and can coincidentally contain
+        # "2", which made this test flaky depending on run order.
+        if path.stem == str(ep2["id"]):
             raise RuntimeError("ffprobe failed")
         return 100.0
 

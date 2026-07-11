@@ -54,19 +54,19 @@ episode works on any feed, at the cost of real per-episode compute.
 
 ## Relationship to hark
 
-Explicitly a candidate for later merging into `flan/hark` as a module — both projects
-fetch feeds, upsert episodes into SQLite, and re-host derived feeds for the same
-AntennaPod-stays-unmodified loop. Kept as a separate repo for now because the two
-pipelines (topic extraction from metadata vs. audio transcription/cutting) don't share
-meaningful code yet. Don't build permanence into this separateness (e.g. don't invent
-a distinct auth/web layer, deployment identity, or feed-registration UX that would
-just get thrown away on merge) — keep it a thin CLI + SQLite + pipeline, matching
-hark's own M0/M1 shape, so a later merge is a module import, not a rewrite.
+Resolved 2026-07-11 (PLAN.md's M5): stays a separate repo, separate CHANGELOG/SemVer,
+separate test suite. `flan/hark` depends on this one as a library (`uv` path
+dependency, editable) — hark's `episodes`/`shows`/`ad_segments` schema was shaped to
+match this project's own, so this package's schema-coupled functions
+(`pending_episodes`, `transcribe_episode`, `detect_pending`, `cut_pending`, ...) work
+unchanged when called with a `conn` from hark's database. hark's CLI
+(`chapters`/`transcribe`/`detect-ads`/`cut`) is a thin wrapper calling straight into
+this package — no code here is duplicated into hark.
 
-The full pipeline (ingest → chapters → transcribe → detect → cut → serve) is now
-built end-to-end as of 0.4.0, which is exactly the trigger PLAN.md's M5 names for
-actually making the merge-or-stay-standalone call — **that's the owner's decision, not
-something to resolve unprompted.** Don't preemptively start merging repos.
+Don't build features assuming this will get absorbed into hark's own source later —
+that already got tried once (a full copy-merge into `src/hark/`, wrong shape, reverted
+same day) and isn't the direction. Keep this repo's own CLI/pipeline/tests
+self-sufficient and runnable standalone, same as before.
 
 ## Conventions
 
