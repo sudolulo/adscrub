@@ -157,7 +157,7 @@ def test_detect_pending_marks_processed_even_with_zero_spans(conn, tmp_path):
 
 
 def test_detect_pending_isolates_per_episode_failures(conn, tmp_path):
-    ep1 = seed_episode(conn, tmp_path)
+    seed_episode(conn, tmp_path)
     conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed2')")
     conn.execute(
         "INSERT INTO episodes (feed_id, guid, title, transcript_path) VALUES (2, 'ep-2', 'Ep 2', ?)",

@@ -157,7 +157,7 @@ def test_cut_episode_updates_row_and_returns_ad_seconds(conn, tmp_path, monkeypa
 
 
 def test_cut_pending_isolates_per_episode_failures(conn, tmp_path, monkeypatch):
-    ep1 = seed_episode(conn, ad_spans=[(10.0, 20.0, "chapter")])
+    seed_episode(conn, ad_spans=[(10.0, 20.0, "chapter")])
     conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed2')")
     conn.execute(
         "INSERT INTO episodes (feed_id, guid, title, audio_url) VALUES (2, 'ep-2', 'Ep 2', ?)",
