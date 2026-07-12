@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-12
 
 ### Added
 
@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own pending-episode selection instead of going through `pending_episodes()`
   — needed by hark's per-show ad-stripping toggle. `detect_pending` now calls
   it internally; behavior unchanged.
+- `detect.spans_from_segment_indices(transcript, raw_spans)`: the
+  segment-index-to-timestamp grounding/validation `ClaudeAdDetector.detect()`
+  did inline, now a public function. Lets a caller build a non-LLM
+  `AdSpanDetector` (e.g. one fed pre-computed spans from an offline judgment
+  pass) that still gets the same bounds-checking and timestamp-grounding
+  `ClaudeAdDetector` gets, instead of reimplementing it. `ClaudeAdDetector`
+  now calls it internally; behavior unchanged.
 
 ### Fixed
 

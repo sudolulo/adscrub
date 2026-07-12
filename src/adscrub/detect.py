@@ -67,6 +67,35 @@ class _Detection(BaseModel):
     ad_spans: list[_Span]
 
 
+def spans_from_segment_indices(
+    transcript: list[dict], raw_spans: list[dict]
+) -> list[DetectedAdSpan]:
+    """Ground `{start_segment, end_segment, reason}` dicts in a transcript's own
+    timestamps, discarding any span with a missing/out-of-range index.
+
+    Factored out of ClaudeAdDetector.detect() so any other AdSpanDetector
+    implementation — e.g. one fed pre-computed spans instead of calling an
+    LLM live — gets the same index-validation/grounding for free rather than
+    reimplementing it.
+    """
+    n = len(transcript)
+    spans = []
+    for raw in raw_spans:
+        start, end = raw.get("start_segment"), raw.get("end_segment")
+        if not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if not (0 <= start <= end < n):
+            continue
+        spans.append(
+            DetectedAdSpan(
+                start_second=transcript[start]["start"],
+                end_second=transcript[end]["end"],
+                reason=str(raw.get("reason", "")).strip(),
+            )
+        )
+    return spans
+
+
 class ClaudeAdDetector:
     """Detect ad spans with a Claude model via structured outputs.
 
@@ -96,19 +125,13 @@ class ClaudeAdDetector:
         parsed = response.parsed_output
         if parsed is None:  # refusal or malformed output
             return []
-        n = len(transcript)
-        spans = []
-        for span in parsed.ad_spans:
-            if not (0 <= span.start_segment <= span.end_segment < n):
-                continue
-            spans.append(
-                DetectedAdSpan(
-                    start_second=transcript[span.start_segment]["start"],
-                    end_second=transcript[span.end_segment]["end"],
-                    reason=span.reason.strip(),
-                )
-            )
-        return spans
+        return spans_from_segment_indices(
+            transcript,
+            [
+                {"start_segment": s.start_segment, "end_segment": s.end_segment, "reason": s.reason}
+                for s in parsed.ad_spans
+            ],
+        )
 
 
 @dataclass
