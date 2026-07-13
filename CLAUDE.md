@@ -80,5 +80,10 @@ self-sufficient and runnable standalone, same as before.
   reference prompts or instructions.
 - Significant multi-commit features go on a feature branch; small increments are fine
   directly on main.
-- Remote: private Gitea repo `flan/adscrub` (origin, SSH). Do not create additional
-  remotes or mirrors unprompted.
+- Remote: **Gitea `flan/adscrub` is canonical** (origin, SSH) — always push there. The repo
+  is public, and `claude-fleet`'s `jobs/repo-mirror.sh` mirrors it out to
+  `github.com/sudolulo/adscrub` for visibility. GitHub is a read-only shop window: never
+  push to it directly, and never treat it as a source of truth. Policy lives in
+  `claude-fleet/config/repos.toml`. Do not add other remotes or mirrors unprompted.
+- Public-facing docs must not link to `git.onetick.ninja` — outsiders cannot reach it.
+  Cross-reference sibling projects by their GitHub URL.

@@ -73,7 +73,7 @@ Tests use local feed fixtures — no network.
 ## Relationship to hark
 
 Resolved 2026-07-11 (see M5 in docs/PLAN.md): this stays a separate product.
-[hark](https://git.onetick.ninja/flan/hark) depends on it as a library (a `uv`
+[hark](https://github.com/sudolulo/hark) depends on it as a library (a `uv`
 path dependency, editable) rather than folding its source in — hark's own
 `episodes`/`ad_segments` schema was shaped to match this project's, so
 adscrub's schema-coupled functions (`pending_episodes`, `transcribe_episode`,
