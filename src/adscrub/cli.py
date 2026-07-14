@@ -1,4 +1,4 @@
-"""adscrub command line: add-feed, ingest, chapters, transcribe, detect, cut, serve, stats."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, repeats, detect, cut, serve, stats."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 
 import httpx
 
-from . import __version__, chapters, cut, db, detect, feed, ingest, transcribe
+from . import __version__, chapters, cut, db, detect, feed, ingest, repeats, transcribe
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
@@ -93,6 +93,29 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_repeats(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    library = repeats.build_library(conn)
+    if not library:
+        print("no confirmed ad spans anywhere yet — the LLM (or chapters) has to go first",
+              file=sys.stderr)
+        return 1
+
+    def report(r: repeats.RepeatResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} repeated ad span(s)")
+
+    results = repeats.apply_repeats(conn, limit=args.limit, on_result=report)
+    errors = sum(1 for r in results if r.error)
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"matched {found} repeated ad span(s) across {hit} of {len(results)} episode(s) "
+          f"({errors} failed) — {len(library):,} known ad shingles, no model called")
+    return 0
+
+
 def cmd_detect(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     pending = detect.pending_episodes(conn, args.limit)
@@ -115,7 +138,16 @@ def cmd_detect(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    detector = detect.ClaudeAdDetector(client, model=args.model)
+    # Cheapest tier first, always — the model should never be asked to re-read an ad read
+    # the corpus already knows. Composing rather than branching: if the library is empty
+    # (nothing confirmed yet) this is just the Claude detector, with no special case.
+    library = repeats.build_library(conn)
+    tiers: list[detect.AdSpanDetector] = []
+    if library:
+        tiers.append(repeats.RepeatAdDetector(library))
+        print(f"  ..    {len(library):,} known ad shingles in front of the model", file=sys.stderr)
+    tiers.append(detect.ClaudeAdDetector(client, model=args.model))
+    detector = detect.LayeredDetector(tiers)
 
     def report(r: detect.DetectResult) -> None:
         if r.error:
@@ -210,6 +242,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser(
+        "repeats",
+        help="match transcripts against ad reads already confirmed elsewhere (free, no model)")
+    p.add_argument("--limit", type=int, help="only scan this many episodes")
+    p.set_defaults(func=cmd_repeats)
 
     p = sub.add_parser("detect", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
