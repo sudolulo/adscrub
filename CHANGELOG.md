@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-07-14
+
+### Fixed
+
+- **Transcription now falls back to CPU when CUDA is visible but not actually
+  usable.** `_pick_device()` only checked `ctranslate2.get_cuda_device_count()`
+  (driver/device nodes visible), not whether the runtime libraries were
+  actually loadable — hit in production 2026-07-14 on a hark deploy: every
+  single episode failed with `RuntimeError: Library libcublas.so.12 is not
+  found or cannot be loaded`, since the failure only surfaces lazily at first
+  real inference, not at model construction. `transcribe_episode()` now
+  catches that specific failure, flips a `_cuda_broken` flag, and retries once
+  on CPU int8 — for the rest of that process, `_pick_device()` skips CUDA
+  entirely instead of failing every episode the same way forever.
+
 ## [0.5.0] - 2026-07-12
 
 ### Added

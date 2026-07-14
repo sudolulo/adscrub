@@ -65,6 +65,57 @@ class FakeModel:
         return self._segments, object()
 
 
+def test_transcribe_episode_falls_back_to_cpu_when_cuda_reports_available_but_broken(
+    conn, tmp_path, monkeypatch
+):
+    """Regression (2026-07-14 production incident): ctranslate2 reported a CUDA
+    device present, but its runtime libraries weren't actually loadable — every
+    transcription failed with 'Library libcublas.so.12 is not found or cannot be
+    loaded' instead of falling back to CPU the way the module intends."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.execute(
+        "INSERT INTO episodes (feed_id, guid, title, audio_url) VALUES (1, 'ep-1', 'Ep 1', ?)",
+        (AUDIO_URL,),
+    )
+    conn.commit()
+    ep = conn.execute("SELECT * FROM episodes WHERE guid = 'ep-1'").fetchone()
+
+    monkeypatch.setattr(transcribe, "_cuda_broken", False)
+    monkeypatch.setattr(transcribe, "_model", None)
+    monkeypatch.setattr(transcribe, "_model_key", None)
+
+    fake_segments = [FakeSegment(0.0, 5.0, "Welcome to the show")]
+    calls = []
+
+    class FlakyOnceModel:
+        def __init__(self, device):
+            self.device = device
+
+        def transcribe(self, path, vad_filter=True):
+            calls.append(self.device)
+            if self.device == "cuda":
+                raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            return fake_segments, object()
+
+    def fake_load_model(model_size=None):
+        # Mirrors _pick_device's real logic (CUDA until _cuda_broken flips)
+        # without touching real ctranslate2/faster_whisper, matching this
+        # file's existing convention of mocking load_model entirely.
+        device = "cpu" if transcribe._cuda_broken else "cuda"
+        return FlakyOnceModel(device)
+
+    monkeypatch.setattr(transcribe, "load_model", fake_load_model)
+
+    with audio_client([]) as client:
+        path = transcribe.transcribe_episode(conn, ep, client, data_dir=tmp_path)
+
+    assert calls == ["cuda", "cpu"]  # tried CUDA, caught the failure, retried on CPU
+    assert transcribe._cuda_broken is True  # remembered for the rest of this process
+    assert json.loads(path.read_text()) == [
+        {"start": 0.0, "end": 5.0, "text": "Welcome to the show"}
+    ]
+
+
 def test_transcribe_episode_writes_transcript_and_updates_row(conn, tmp_path, monkeypatch):
     conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
     conn.execute(

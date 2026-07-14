@@ -7,6 +7,14 @@ physically has an RTX 2070 SUPER and Docker here has the `nvidia` runtime + a
 CDI device registered, but an interactive dev shell doesn't get the device
 nodes passed through, so this same code legitimately runs CPU in one context
 and GPU in another — see CLAUDE.md.
+
+Device *visibility* and device *usability* aren't the same thing, though: a
+container can have /dev/nvidia* nodes passed through (get_cuda_device_count()
+> 0) while still lacking the actual CUDA runtime libraries (e.g. built
+without the `gpu` extra) — hit in production 2026-07-14, every transcription
+failing with "Library libcublas.so.12 is not found or cannot be loaded".
+transcribe_episode() catches that lazily, at first real inference, and falls
+back to CPU for the rest of the process rather than failing every episode.
 """
 
 from __future__ import annotations
@@ -24,28 +32,36 @@ from .db import utcnow
 DEFAULT_MODEL = os.environ.get("ADSCRUB_WHISPER_MODEL", "small")
 
 _model = None
-_model_size = None
+_model_key = None
+_cuda_broken = False  # flipped once a CUDA device that reports itself available
+# turns out unusable at actual inference time (see transcribe_episode below)
 
 
 def _pick_device() -> tuple[str, str]:
     import ctranslate2
 
-    if ctranslate2.get_cuda_device_count() > 0:
+    if not _cuda_broken and ctranslate2.get_cuda_device_count() > 0:
         return "cuda", "float16"
     return "cpu", "int8"
 
 
 def load_model(model_size: str = DEFAULT_MODEL):
-    """Load (and cache) the Whisper model. Reloads only if model_size changes."""
-    global _model, _model_size
-    if _model is not None and _model_size == model_size:
+    """Load (and cache) the Whisper model. Reloads if model_size changes, or if
+    the picked device changes (e.g. after a CUDA runtime failure flips
+    _cuda_broken and _pick_device starts returning "cpu")."""
+    global _model, _model_key
+    device, compute_type = _pick_device()
+    key = (model_size, device)
+    if _model is not None and _model_key == key:
         return _model
     from faster_whisper import WhisperModel
 
-    device, compute_type = _pick_device()
     _model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    _model_size = model_size
+    _model_key = key
     return _model
+
+
+_CUDA_RUNTIME_ERROR_MARKERS = ("cublas", "cudnn")
 
 
 def transcribe_episode(
@@ -56,11 +72,25 @@ def transcribe_episode(
     model_size: str = DEFAULT_MODEL,
 ) -> Path:
     """Download (if needed), transcribe, store segment timestamps, update the episode row."""
+    global _cuda_broken
     audio_path = download_audio(
         client, episode["audio_url"], data_dir / "audio" / f"{episode['id']}.mp3"
     )
     model = load_model(model_size)
-    segments, _info = model.transcribe(str(audio_path), vad_filter=True)
+    try:
+        segments, _info = model.transcribe(str(audio_path), vad_filter=True)
+    except RuntimeError as exc:
+        # ctranslate2.get_cuda_device_count() can report a device present (driver +
+        # device nodes visible) without its runtime libraries actually being
+        # loadable — e.g. an image built without the gpu extra running on a host
+        # that still exposes /dev/nvidia*. That surfaces here, lazily, on first
+        # real inference rather than at model construction. Fall back to CPU for
+        # the rest of this process instead of failing every episode forever.
+        if _cuda_broken or not any(m in str(exc).lower() for m in _CUDA_RUNTIME_ERROR_MARKERS):
+            raise
+        _cuda_broken = True
+        model = load_model(model_size)
+        segments, _info = model.transcribe(str(audio_path), vad_filter=True)
     transcript = [
         {"start": seg.start, "end": seg.end, "text": seg.text.strip()} for seg in segments
     ]
