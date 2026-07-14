@@ -194,6 +194,32 @@ class RepeatResult:
     error: str | None = None
 
 
+def repeat_episode(
+    conn: sqlite3.Connection, episode: sqlite3.Row, detector: RepeatAdDetector
+) -> int:
+    """Scan ONE episode against the library and store what it finds. Returns count.
+
+    Mirrors detect.detect_episode deliberately, and is public for the same reason: a
+    caller with its own pending-episode selection — hark filters by a per-show
+    `ad_stripping_enabled` toggle that adscrub knows nothing about — can use this tier
+    without adscrub having to learn about that filter, and without hark reimplementing
+    the tier. Bulk `apply_repeats` below is just this in a loop.
+
+    Idempotent: the episode's existing `repeat` rows are dropped and rewritten, so a
+    re-scan against a grown library refreshes rather than duplicates. `llm` and `chapter`
+    rows are never touched — this tier only ever speaks for itself.
+    """
+    transcript = _load_transcript(episode["transcript_path"])
+    spans = detector.detect(transcript)
+    conn.execute(
+        "DELETE FROM ad_segments WHERE episode_id = ? AND source = 'repeat'",
+        (episode["id"],),
+    )
+    insert_spans(conn, episode["id"], spans)
+    conn.commit()
+    return len(spans)
+
+
 def apply_repeats(
     conn: sqlite3.Connection,
     limit: int | None = None,
@@ -230,15 +256,7 @@ def apply_repeats(
     for row in conn.execute(query, params).fetchall():
         result = RepeatResult(episode_id=row["id"], title=row["title"] or "")
         try:
-            transcript = _load_transcript(row["transcript_path"])
-            spans = detector.detect(transcript)
-            conn.execute(
-                "DELETE FROM ad_segments WHERE episode_id = ? AND source = 'repeat'",
-                (row["id"],),
-            )
-            insert_spans(conn, row["id"], spans)
-            conn.commit()
-            result.found = len(spans)
+            result.found = repeat_episode(conn, row, detector)
         except Exception as exc:  # noqa: BLE001 — one bad transcript must not stop the sweep
             conn.rollback()
             result.error = str(exc)
