@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-14
+
+### Added
+
+- **`repeats.prioritize_pending()`: order the LLM-detection queue by count mismatch,
+  not by episode id.** For each pending episode, compares how many ad breaks the
+  repeat tier finds against the show's typical count (median across its own
+  `llm_detected_at`-confirmed episodes); episodes where the count doesn't match are
+  ranked first. Explicitly **not a skip gate** — leave-one-out validation (Casefile
+  True Crime, the only show with enough ground truth to test against; see the
+  single-show caveat already on `repeats.py`) found exact-count matches still had real
+  recall gaps as low as 66.7%, so a match is only trusted to mean "process later,"
+  never "skip." Shows with fewer than `min_show_history` confirmed episodes have no
+  reliable typical count and keep their original order, appended after every episode
+  that does have a signal. `group_column` defaults to this project's own `feed_id`;
+  a caller on a renamed schema (hark: `show_id`) passes the real name.
+
 ## [0.6.0] - 2026-07-14
 
 ### Added

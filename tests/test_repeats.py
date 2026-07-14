@@ -201,3 +201,94 @@ def test_detector_scans_the_whole_transcript(monkeypatch):
     assert len(calls) > 1
     seen = "\n".join(calls)
     assert "[1499] " in seen, "the last segment never reached the model"
+
+
+# --- prioritize_pending ---
+
+NO_AD = [
+    {"start": 0.0, "end": 10.0, "text": "A completely unrelated editorial segment about"
+     " something else entirely, nothing here resembles any known sponsor read."},
+]
+
+
+def _mark_ground_truth(conn, episode_id):
+    conn.execute(
+        "UPDATE episodes SET llm_detected_at = '2026-01-01T00:00:00Z' WHERE id = ?",
+        (episode_id,),
+    )
+
+
+def test_prioritize_pending_ranks_count_mismatch_first(conn, tmp_path):
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    # 3 ground-truth episodes, each confirmed with exactly 1 ad segment -> typical count 1.
+    for i in range(3):
+        eid = seed(conn, tmp_path, f"gt-{i}", AD_A, ad_spans=[(4.0, 14.0)])
+        _mark_ground_truth(conn, eid)
+    conn.commit()
+
+    # Repeats the known ad once -> repeat tier finds 1 -> matches typical (diff 0).
+    match_id = seed(conn, tmp_path, "pending-match", AD_B)
+    # No ad content at all -> repeat tier finds 0 -> diff 1, should rank first.
+    mismatch_id = seed(conn, tmp_path, "pending-mismatch", NO_AD)
+
+    pending = [
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (match_id,)).fetchone(),
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (mismatch_id,)).fetchone(),
+    ]
+    ranked = repeats.prioritize_pending(conn, pending, group_column="feed_id", min_show_history=3)
+    assert [ep["id"] for ep in ranked] == [mismatch_id, match_id]
+
+
+def test_prioritize_pending_leaves_low_history_shows_unranked(conn, tmp_path):
+    """Fewer than min_show_history ground-truth episodes -> no typical count exists ->
+    original relative order is kept, nothing reordered on a guess."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    for i in range(2):  # below the default min_show_history of 3
+        eid = seed(conn, tmp_path, f"gt-{i}", AD_A, ad_spans=[(4.0, 14.0)])
+        _mark_ground_truth(conn, eid)
+    conn.commit()
+
+    p1 = seed(conn, tmp_path, "pending-1", AD_B)
+    p2 = seed(conn, tmp_path, "pending-2", NO_AD)
+
+    pending = [
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (p1,)).fetchone(),
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (p2,)).fetchone(),
+    ]
+    ranked = repeats.prioritize_pending(conn, pending, group_column="feed_id")
+    assert [ep["id"] for ep in ranked] == [p1, p2]
+
+
+def test_prioritize_pending_keeps_unreadable_transcript_episodes(conn, tmp_path):
+    """A transcript that can't be loaded must still be processed eventually — dropping
+    it from the queue entirely would be worse than leaving it unranked."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    for i in range(3):
+        eid = seed(conn, tmp_path, f"gt-{i}", AD_A, ad_spans=[(4.0, 14.0)])
+        _mark_ground_truth(conn, eid)
+    conn.commit()
+
+    broken_id = seed(conn, tmp_path, "pending-broken", AD_B)
+    conn.execute(
+        "UPDATE episodes SET transcript_path = ? WHERE id = ?",
+        (str(tmp_path / "missing.json"), broken_id),
+    )
+    conn.commit()
+
+    pending = [conn.execute("SELECT * FROM episodes WHERE id = ?", (broken_id,)).fetchone()]
+    ranked = repeats.prioritize_pending(conn, pending, group_column="feed_id", min_show_history=3)
+    assert [ep["id"] for ep in ranked] == [broken_id]
+
+
+def test_prioritize_pending_no_ground_truth_returns_unchanged(conn, tmp_path):
+    """No llm_detected_at episodes anywhere yet -> nothing to compute a typical count
+    from -> the input order passes through untouched."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    p1 = seed(conn, tmp_path, "pending-1", AD_B)
+    p2 = seed(conn, tmp_path, "pending-2", NO_AD)
+    pending = [
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (p1,)).fetchone(),
+        conn.execute("SELECT * FROM episodes WHERE id = ?", (p2,)).fetchone(),
+    ]
+    ranked = repeats.prioritize_pending(conn, pending, group_column="feed_id")
+    assert [ep["id"] for ep in ranked] == [p1, p2]

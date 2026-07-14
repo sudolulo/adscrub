@@ -44,6 +44,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import statistics
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -184,6 +186,77 @@ class RepeatAdDetector:
             )
             for a, b in runs
         ]
+
+
+def prioritize_pending(
+    conn: sqlite3.Connection,
+    episodes: list,
+    group_column: str = "feed_id",
+    min_show_history: int = 3,
+) -> list:
+    """Reorder pending episodes (no LLM/chapter ground truth yet) so ones where the
+    repeat tier's found ad-break count differs most from the show's typical count
+    come first — every episode still reaches the model eventually, this only changes
+    the order LLM budget is spent in.
+
+    NOT a skip gate, and deliberately not one: leave-one-out validation (Casefile
+    True Crime, the only show with enough ground truth to test against — see
+    detect.py's own single-show caveat) found exact-count matches still had real
+    recall gaps as low as 66.7%. A matching count means matching *quantity*, not
+    matching *content*, so it is only trusted here to mean "process later", never
+    "skip". See CHANGELOG for the full measurement.
+
+    `group_column` is the episodes column naming the parent show/feed —
+    `episodes.feed_id` in this project's own schema, but a caller on a schema that
+    renamed it (hark: `show_id`) can pass the real name; it's an internal identifier
+    the caller controls, not user input, so it's fine to interpolate into the query
+    directly (no placeholder syntax exists for a column name in SQL).
+
+    Shows with fewer than `min_show_history` ground-truth episodes have no reliable
+    typical count — those episodes keep their original relative order and sort after
+    every episode that does have a signal, rather than asserting a priority there is
+    no evidence for.
+    """
+    placeholders = ",".join("?" * len(GROUND_TRUTH_SOURCES))
+    rows = conn.execute(
+        f"""
+        SELECT e.id, e.{group_column} AS group_id, COUNT(a.id) AS n
+        FROM episodes e
+        LEFT JOIN ad_segments a ON a.episode_id = e.id AND a.source IN ({placeholders})
+        WHERE e.llm_detected_at IS NOT NULL
+        GROUP BY e.id
+        """,
+        GROUND_TRUTH_SOURCES,
+    ).fetchall()
+    counts_by_show: dict[int, list[int]] = defaultdict(list)
+    for row in rows:
+        counts_by_show[row["group_id"]].append(row["n"])
+    typical_by_show = {
+        group_id: statistics.median(counts)
+        for group_id, counts in counts_by_show.items()
+        if len(counts) >= min_show_history
+    }
+    if not typical_by_show:
+        return list(episodes)
+
+    library = build_library(conn)
+    scored = []
+    unscored = []
+    for ep in episodes:
+        typical = typical_by_show.get(ep[group_column])
+        if typical is None:
+            unscored.append(ep)
+            continue
+        try:
+            transcript = _load_transcript(ep["transcript_path"])
+        except (OSError, json.JSONDecodeError):
+            unscored.append(ep)  # can't score it; still gets processed, just unranked
+            continue
+        repeat_count = len(RepeatAdDetector(library=library).detect(transcript))
+        scored.append((abs(repeat_count - typical), ep))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [ep for _, ep in scored] + unscored
 
 
 @dataclass
