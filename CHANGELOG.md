@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-07-14
+
+### Changed
+
+- **The CPU fallback is no longer silent.** 0.5.1 stopped CUDA-visible-but-unusable
+  deploys from failing every episode, but it degraded quietly: the GPU sat at 0%
+  utilization while faster-whisper's CPU int8 path saturated ~4 cores, roughly 10x
+  slower, with nothing in the logs to say so. Found in production on the hark deploy,
+  where it had been burning ~3.7 cores continuously against a 27k-episode backlog. The
+  fallback now prints what happened, why it happened, and how to fix it (rebuild with
+  the `gpu` extra) to stderr.
+- `load_model()` announces the model, device, and compute type it loaded, so a run's
+  logs state up front whether it is on GPU or CPU rather than leaving it to be inferred
+  from CPU load.
+
 ## [0.5.1] - 2026-07-14
 
 ### Fixed

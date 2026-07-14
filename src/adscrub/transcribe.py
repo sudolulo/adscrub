@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import httpx
@@ -58,6 +59,8 @@ def load_model(model_size: str = DEFAULT_MODEL):
 
     _model = WhisperModel(model_size, device=device, compute_type=compute_type)
     _model_key = key
+    print(f"whisper: model={model_size} device={device} compute_type={compute_type}",
+          file=sys.stderr)
     return _model
 
 
@@ -89,6 +92,17 @@ def transcribe_episode(
         if _cuda_broken or not any(m in str(exc).lower() for m in _CUDA_RUNTIME_ERROR_MARKERS):
             raise
         _cuda_broken = True
+        # Loud on purpose. This fallback keeps the run alive, but it silently turns a
+        # GPU job into a ~4-core CPU job that is roughly an order of magnitude slower —
+        # a degradation that is otherwise invisible (the GPU just sits at 0% util while
+        # the host sheds cores). Anyone reading container logs must see why.
+        print(
+            f"whisper: CUDA is visible but unusable ({exc}); falling back to CPU int8 for "
+            "the rest of this process. Transcription will be ~10x slower and will saturate "
+            "several cores. Rebuild the image with the `gpu` extra "
+            "(scripts/build-image.sh --gpu) to actually use the GPU.",
+            file=sys.stderr,
+        )
         model = load_model(model_size)
         segments, _info = model.transcribe(str(audio_path), vad_filter=True)
     transcript = [
