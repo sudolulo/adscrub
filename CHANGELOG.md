@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-14
+
+### Fixed
+
+- **`dai.probe_variance()` now uses an independent client per fetch, not a
+  shared one.** `httpx.Client` keeps a cookie jar by default, and that
+  silently defeated the whole comparison: the first fetch's response sets a
+  listener-tracking cookie, the second fetch (same client) auto-replays it,
+  and the ad server sees the same "listener" both times regardless of the
+  User-Agent difference. Caught on real data: a shared-client run reported
+  acast.com as "same" on an episode a raw two-`curl` test (no shared cookie
+  jar) had already shown genuine divergence on. `probe_variance()` now takes
+  a `client_factory` and builds a fresh client per fetch — no shared jar, no
+  shared connection, so each fetch actually looks like a different session.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added

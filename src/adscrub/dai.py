@@ -12,6 +12,18 @@ WHY THIS EXISTS
     show: two fetches with different User-Agents diverged at ~8.9s in, and
     were byte-identical before that point.
 
+    Each fetch goes through its OWN freshly-constructed client, not a shared
+    one — this matters. httpx.Client keeps a cookie jar by default, and it
+    silently defeats the whole comparison: the first fetch's response sets a
+    listener-tracking cookie, the second fetch (same client) auto-replays it,
+    and the ad server sees the same "listener" both times regardless of the
+    User-Agent difference. A live A/B run on this exact bug: one shared client
+    (auto-persisted cookie) reported acast.com as "same" on an episode a raw
+    two-`curl` test (no shared cookie jar) had already shown genuine
+    divergence on. Two independent clients — no shared jar, no shared
+    connection — is what actually makes each fetch look like a different
+    session, the way two different real listeners would.
+
 WHAT IT CANNOT DO
     Find where a diverged region reconverges if the ad is longer than the
     fetched window, or detect anything on a platform that doesn't vary by
@@ -25,6 +37,7 @@ WHAT IT CANNOT DO
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import httpx
 
@@ -90,16 +103,20 @@ def _find_reconvergence(
 
 
 def probe_variance(
-    client: httpx.Client,
+    client_factory: Callable[[], httpx.Client],
     audio_url: str,
     max_bytes: int = DEFAULT_BYTES,
     user_agents: tuple[str, str] = USER_AGENTS[:2],
     anchor_skip: int = ANCHOR_SKIP,
     anchor_size: int = ANCHOR_SIZE,
 ) -> DAIProbeResult:
-    """Fetch `audio_url` with two different User-Agents and compare the bytes."""
-    a = _fetch(client, audio_url, user_agents[0], max_bytes)
-    b = _fetch(client, audio_url, user_agents[1], max_bytes)
+    """Fetch `audio_url` with two different User-Agents, each through its own
+    freshly-built client (own cookie jar, own connection — see the module
+    docstring for why a shared client silently breaks this), and compare."""
+    with client_factory() as client_a:
+        a = _fetch(client_a, audio_url, user_agents[0], max_bytes)
+    with client_factory() as client_b:
+        b = _fetch(client_b, audio_url, user_agents[1], max_bytes)
     n = min(len(a), len(b))
     divergence = _find_divergence(a, b)
     if divergence is None:
