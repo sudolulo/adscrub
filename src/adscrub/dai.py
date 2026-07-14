@@ -45,18 +45,22 @@ DEFAULT_BYTES = 6 * 1024 * 1024  # ~6MB: covers a typical pre-roll plus runway
 ANCHOR_SIZE = 4096
 ANCHOR_SKIP = 200_000  # bytes past divergence before trying a reconvergence anchor
 
-# Deliberately just User-Agent, no cookies: we don't know a given platform's
-# cookie scheme ahead of time, and sending none at all is itself a common
-# "treat as a distinct listener" trigger on platforms that track one. Two
-# different, plausible device classes (desktop vs. mobile) are enough to
-# reach a targeting decision on a platform whose DAI keys off client type.
+# Real podcast-app signatures, not browsers: measured 2026-07-14 that browser
+# UAs (Chrome/Safari desktop+mobile) under-trigger targeting relative to these
+# — megaphone.fm reported no divergence with browser UAs, then diverged
+# cleanly (with a real reconvergence point) once probed as Apple Podcasts vs.
+# Spotify. A browser requesting an MP3 directly isn't traffic an ad server has
+# any reason to personalize; a client claiming to BE a podcast app is exactly
+# the traffic its targeting logic exists to look at. Deliberately just
+# User-Agent, no cookies: we don't know a given platform's cookie scheme ahead
+# of time, and sending none at all is itself a common "distinct listener"
+# trigger on platforms that track one (see dai_probe's own client-isolation
+# fix for why a shared cookie jar defeats this regardless of UA).
 USER_AGENTS = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
-    " Chrome/126.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15"
-    " (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko)"
-    " Chrome/126.0 Mobile Safari/537.36",
+    "AppleCoreMedia/1.0.0.21F90 (iPhone; U; CPU OS 17_5 like Mac OS X; en_us)",
+    "Spotify/8.9.44 Android/34 (Pixel 8)",
+    "Overcast/2024.1 (+http://overcastfm.com/; iOS podcast app)",
+    "AntennaPod/3.5 (Linux; Android 14) (Google;Pixel 8)",
 )
 
 
