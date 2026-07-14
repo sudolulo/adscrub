@@ -246,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser(
         "repeats",
         help="match transcripts against ad reads already confirmed elsewhere (free, no model)")
-    p.add_argument("--limit", type=int, help="only scan this many episodes")
+    p.add_argument("--limit", type=int,
+                   help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
     p.set_defaults(func=cmd_repeats)
 
     p = sub.add_parser("detect", help="classify ad spans from transcripts with a Claude model")
