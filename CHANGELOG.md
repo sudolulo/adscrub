@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-14
+
+### Added
+
+- **A repeat-ad tier (`adscrub repeats`, `repeats.py`) — the same ad read, recognised for free
+  the second time.** Ads arrive in batches: the ad server rotates a small pool of campaigns, and
+  we download each episode once, server-side, from that pool. So the same reads recur
+  near-verbatim across the episodes we fetched in the same period. Measured leave-one-out over
+  the live corpus (82 episodes, 286 confirmed spans): **93.5% of confirmed ad segments are
+  recoverable from ad reads confirmed in *other* episodes**, and 51 of 80 episodes are ≥95%
+  covered — with no model called at all.
+  Matching is on 5-word shingles at a 0.4 overlap threshold, not whole-segment equality: Whisper
+  segments the *same* ad read differently between episodes (different surrounding audio → different
+  boundaries), and exact matching scored 70% where shingles score 93.5%.
+  **This is not the fingerprinting CLAUDE.md rejects, and that ruling stands.** What was rejected
+  was a *global, crowdsourced* ad-timestamp database, on the grounds that dynamically-inserted and
+  host-read ads are unique per listener so there is nothing stable for strangers to match against.
+  True then, true now. But it was never true of our *own* corpus — the thing there was "nothing to
+  fingerprint against" has been sitting in our own `ad_segments` table the whole time. This is the
+  cheap tier in front of the model, which is what "detection is layered, cheapest-first" already
+  asked for.
+- **`LayeredDetector`** — composes tiers (chapters / repeats / LLM) into one `AdSpanDetector`, so
+  every existing call site takes the layering with nothing else changing. Spans keep their own
+  `source`, overlaps are allowed, and `cut.py` merges them at cut time. No tier knows about any
+  other tier; no caller branches. `adscrub detect` now puts the repeat tier in front of the model
+  automatically — if the library is empty it degrades to exactly the old behaviour, with no special
+  case.
+
+### Fixed
+
+- **`ClaudeAdDetector` was truncating every transcript to its first 20,000 characters — about 28%
+  of an episode — and then marking the episode detected.** The line was `body[:20000]`, with the
+  note "a bloated transcript shouldn't dominate the token bill". The cost instinct was right; the
+  implementation threw the episode away. A rendered transcript runs ~88,000 characters, so the
+  model saw segments 0–235 of 840: **every mid-roll and every end-tag ad sat past the cliff,
+  unseen**, and `llm_detected_at` was then set, so the episode never came back and those ads stayed
+  in the audio permanently. A truncation that also marks the work complete is worse than no
+  detection at all — it launders a 28% look as a finished one. Now chunked: same per-call ceiling,
+  whole episode covered, indices still global so spans are grounded exactly as before. Regression
+  test asserts the last segment of a 1,500-segment transcript actually reaches the model.
+- **Detection recall was worse than anyone could see.** Of the segments the repeat tier flags that
+  the LLM did *not*, 31% carry an unambiguous brand/CTA marker ("betterhelp.com slash casefile",
+  "download the free app") — against 29% of the segments the LLM *did* flag. Identical density:
+  these are the same kind of content, not false positives. 62% of episodes had at least one
+  provably-missed ad still in the audio. Running the repeat tier over episodes already marked
+  `llm_detected_at` is therefore free recall, not redundant work.
+
 ## [0.5.2] - 2026-07-14
 
 ### Changed

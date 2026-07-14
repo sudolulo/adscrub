@@ -38,6 +38,28 @@ episode works on any feed, at the cost of real per-episode compute.
   Fingerprinting (à la AdBlockRadio) only catches ads that repeat verbatim; modern
   podcast ads are frequently host-read and/or dynamically inserted per listener, so
   there's often nothing to fingerprint against. Transcribe, then classify the text.
+  - **NARROWED 2026-07-14 (0.6.0), on evidence — read this before "fixing" `repeats.py`.**
+    The above rejects a *global, crowdsourced* ad database (SponsorBlock-for-podcasts), and
+    it still does: strangers' ads are not our ads, so there is nothing to share.
+    It was never an argument against matching our corpus against **itself**. We download
+    each episode once, server-side, from an ad server rotating a small pool of campaigns —
+    so the same reads recur near-verbatim across episodes fetched in the same period. The
+    thing there was supposedly "nothing to fingerprint against" was sitting in our own
+    `ad_segments` table.
+    Measured leave-one-out on the live corpus: **93.5% of confirmed ad segments are
+    recoverable from ad reads confirmed in other episodes** (5-word shingles, 0.4 overlap);
+    51 of 80 episodes are ≥95% covered with no model call. And it is not merely cheaper —
+    it is *more accurate*: the LLM was silently missing ads (62% of episodes had at least
+    one provably-missed ad still in the audio), and the repeat tier finds them.
+    So `repeats.py` is the cheap tier **in front of** the model, never a replacement — a
+    novel campaign still needs the model to read the words; a campaign it has already read
+    does not need it to read them twice. This is what "detection is layered, cheapest-first"
+    always asked for. Text-level only; audio fingerprinting remains un-built and unneeded.
+  - **`repeat` spans are inference, not evidence — never feed them back into the library**
+    (`repeats.GROUND_TRUTH_SOURCES`). Doing so makes the detector bootstrap off its own
+    guesses: caught on real data, a second sweep went 958 → 993 spans as each pass's
+    inferences became the next pass's evidence and the idea of "what an ad sounds like"
+    drifted outward. Evidence in, inference out.
 - **GPU is real, just not wired into this interactive shell.** `code` (a LAN host)
   physically has an RTX 2070 SUPER (`lspci`: NVIDIA TU104), and Docker on this host has
   the `nvidia` runtime registered plus a CDI spec for `/dev/nvidia0` (confirmed

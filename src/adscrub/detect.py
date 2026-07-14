@@ -44,6 +44,9 @@ class DetectedAdSpan:
     start_second: float
     end_second: float
     reason: str
+    # Which tier found it. Spans from different tiers are allowed to overlap and are
+    # merged at cut time (see cut.py) — "dedup is a pipeline concern, not a schema one".
+    source: str = "llm"
 
 
 class AdSpanDetector(Protocol):
@@ -55,6 +58,34 @@ class NullDetector:
 
     def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
         return []
+
+
+@dataclass
+class LayeredDetector:
+    """Run several detectors over one transcript and take the union of what they find.
+
+    This is "detection is layered, cheapest-first" made into an object instead of a
+    convention. It satisfies AdSpanDetector itself, so it drops into detect_episode /
+    detect_pending — and into hark's own per-show loop — with nothing else changing:
+    a caller that wants the repeat tier in front of the model composes
+
+        LayeredDetector([RepeatAdDetector(library), ClaudeAdDetector(client)])
+
+    and a caller that wants only one passes only one. No flags, no branches, no tier
+    knowing about any other tier.
+
+    The union is deliberate: spans keep their own `source`, overlaps are allowed, and
+    cut.py merges them at cut time. Nothing here has to decide which tier "wins" —
+    dedup is a pipeline concern, not a schema one, and not a detector one either.
+    """
+
+    detectors: list[AdSpanDetector]
+
+    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
+        spans: list[DetectedAdSpan] = []
+        for detector in self.detectors:
+            spans += detector.detect(transcript)
+        return spans
 
 
 class _Span(BaseModel):
@@ -96,6 +127,39 @@ def spans_from_segment_indices(
     return spans
 
 
+# Bound the size of any ONE call, without bounding what the model gets to see.
+#
+# This used to be `body[:20000]` — a single call, hard-truncated, with the note "a bloated
+# transcript shouldn't dominate the token bill". The cost instinct was right and is kept;
+# the implementation silently threw away the episode. A rendered transcript runs ~88,000
+# characters, so 20,000 of them is the first ~28% — segments 0-235 of 840. Every mid-roll
+# and every end-tag ad sits past that cliff, unseen. The episode was then marked
+# `llm_detected_at` and never looked at again, so the ads it "found none" of stayed in the
+# audio permanently. A truncation that also marks the work complete is worse than no
+# detection at all: it launders a 28% look as a finished one.
+#
+# Chunking keeps the per-call ceiling and covers the whole episode. Indices stay global,
+# so spans are grounded exactly as before.
+_CHUNK_CHARS = 20_000
+
+
+def _chunks(transcript: list[dict]) -> list[str]:
+    """Render the whole transcript as one or more calls' worth of numbered segments."""
+    out: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for i, seg in enumerate(transcript):
+        line = f"[{i}] {seg['start']:.1f}-{seg['end']:.1f}: {seg['text']}"
+        if buf and size + len(line) + 1 > _CHUNK_CHARS:
+            out.append("\n".join(buf))
+            buf, size = [], 0
+        buf.append(line)
+        size += len(line) + 1
+    if buf:
+        out.append("\n".join(buf))
+    return out
+
+
 class ClaudeAdDetector:
     """Detect ad spans with a Claude model via structured outputs.
 
@@ -110,28 +174,25 @@ class ClaudeAdDetector:
     def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
         if not transcript:
             return []
-        body = "\n".join(
-            f"[{i}] {seg['start']:.1f}-{seg['end']:.1f}: {seg['text']}"
-            for i, seg in enumerate(transcript)
-        )
-        response = self.client.messages.parse(
-            model=self.model,
-            max_tokens=2048,
-            system=_SYSTEM,
-            # a bloated transcript shouldn't dominate the token bill
-            messages=[{"role": "user", "content": body[:20000]}],
-            output_format=_Detection,
-        )
-        parsed = response.parsed_output
-        if parsed is None:  # refusal or malformed output
-            return []
-        return spans_from_segment_indices(
-            transcript,
-            [
+        raw: list[dict] = []
+        for chunk in _chunks(transcript):
+            response = self.client.messages.parse(
+                model=self.model,
+                max_tokens=2048,
+                system=_SYSTEM,
+                messages=[{"role": "user", "content": chunk}],
+                output_format=_Detection,
+            )
+            parsed = response.parsed_output
+            if parsed is None:  # refusal or malformed output — skip this chunk, keep the rest
+                continue
+            raw += [
                 {"start_segment": s.start_segment, "end_segment": s.end_segment, "reason": s.reason}
                 for s in parsed.ad_spans
-            ],
-        )
+            ]
+        # Indices are global, so a span split across a chunk boundary comes back as two
+        # adjacent spans. cut.py merges them; nothing here needs to.
+        return spans_from_segment_indices(transcript, raw)
 
 
 @dataclass
@@ -155,20 +216,30 @@ def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list
     return conn.execute(query).fetchall()
 
 
+def insert_spans(conn: sqlite3.Connection, episode_id: int, spans: list[DetectedAdSpan]) -> None:
+    """Insert spans under each span's own `source`, without marking anything processed.
+
+    Split out of _store so a tier that costs nothing to re-run (repeats.py) can record
+    what it finds WITHOUT setting llm_detected_at — which would retire the episode from
+    LLM detection forever on the strength of a free pass that never read it.
+    """
+    for span in spans:
+        conn.execute(
+            """
+            INSERT INTO ad_segments (episode_id, start_second, end_second, source, reason)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (episode_id, span.start_second, span.end_second, span.source, span.reason),
+        )
+
+
 def _store(conn: sqlite3.Connection, episode_id: int, spans: list[DetectedAdSpan]) -> None:
     """Store any detected spans and mark the episode processed.
 
     Marks llm_detected_at even when zero spans are found — otherwise an
     episode with no ads gets re-sent to the LLM (and re-billed) every run.
     """
-    for span in spans:
-        conn.execute(
-            """
-            INSERT INTO ad_segments (episode_id, start_second, end_second, source, reason)
-            VALUES (?, ?, ?, 'llm', ?)
-            """,
-            (episode_id, span.start_second, span.end_second, span.reason),
-        )
+    insert_spans(conn, episode_id, spans)
     now = utcnow()
     conn.execute(
         "UPDATE episodes SET llm_detected_at = ?, updated_at = ? WHERE id = ?",
