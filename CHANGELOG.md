@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-14
+
+### Added
+
+- **`dai.probe_variance()`: a third, even cheaper ad-detection primitive.**
+  Fetches an episode's `audio_url` twice with different User-Agents (no
+  cookies — an absent one is itself a common "distinct listener" trigger) and
+  byte-compares the results. If a platform's dynamic ad insertion actually
+  varies by these signals, the divergence point is a provable ad-relevant
+  boundary with zero transcription and zero classification. Confirmed live
+  against an Acast-hosted show: two same-signature fetches came back cached
+  and identical, but varying User-Agent produced a genuinely different
+  stitched file, diverging at ~8.9s in — byte-identical before that point.
+  Also finds where the streams reconverge, by searching for a content anchor
+  (not a byte position) from well past the divergence point — necessary
+  because two different-length ad reads leave the following editorial audio
+  at different absolute offsets in each stream even when its bytes are
+  identical. A clean "no divergence" result is not proof a platform has no
+  DAI, only that these signals didn't trigger a different render within the
+  fetched window.
+
 ## [0.6.1] - 2026-07-14
 
 ### Added
