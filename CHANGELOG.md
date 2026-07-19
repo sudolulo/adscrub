@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`download_audio` now caps episode size** (default 1 GiB, override with
+  `ADSCRUB_MAX_AUDIO_MB`). A hostile or malformed feed could previously stream
+  an unbounded body and fill the data volume. An oversized declared
+  `Content-Length` is rejected up front, and the running byte total aborts the
+  stream mid-download; the partial `.part` file is cleaned up on abort.
+
 ## [0.7.2] - 2026-07-14
 
 ### Changed
