@@ -619,6 +619,198 @@ def discover_recurring(
 
 
 @dataclass
+class Campaign:
+    """One ad RECORDING, and every episode it was found in."""
+
+    episodes: list[int]
+    representative: tuple[int, float, float]  # (episode_id, start_second, end_second)
+    known: bool = False                       # already confirmed by a ground-truth tier
+
+    @property
+    def reach(self) -> int:
+        return len(self.episodes)
+
+
+def _runs_by_episode(fps, library, match_frames, bridge, floor):
+    """Recurring frame-runs per episode, plus the raw diagonals that produced them."""
+    runs: dict[int, list[tuple[int, int]]] = {}
+    links: dict[int, list[tuple[int, int, int]]] = {}  # eid -> [(other_eid, offset, query_frame)]
+    for eid, (fp, _dur) in fps.items():
+        diagonals: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for i, v in enumerate(fp):
+            if v in library.stop:
+                continue
+            for other, j in library.index.get(v, ()):
+                if other == eid:
+                    continue
+                diagonals[(other, i - j)].append(i)
+        frames: set[int] = set()
+        kept: list[tuple[int, int, int]] = []
+        for (other, offset), hits in diagonals.items():
+            if len(hits) >= match_frames:
+                frames.update(hits)
+                kept += [(other, offset, f) for f in hits]
+        runs[eid] = _group_runs(sorted(frames), bridge, floor)
+        links[eid] = kept
+    return runs, links
+
+
+def _run_index(runs: list[tuple[int, int]], frame: int) -> int | None:
+    for k, (a, b) in enumerate(runs):
+        if a <= frame <= b:
+            return k
+    return None
+
+
+def find_campaigns(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    episode_ids: list[int] | None = None,
+    sources: tuple[str, ...] = GROUND_TRUTH_SOURCES,
+) -> list[Campaign]:
+    """Group recurring audio into distinct CAMPAIGNS — one entry per ad recording.
+
+    `discover_recurring` answers "where does this episode repeat itself?", per episode. That is
+    the wrong unit for spending a model budget: twelve episodes carrying the same sponsor read
+    look like twelve findings, when reading any ONE of them teaches the library all twelve.
+
+    So regions are linked across episodes by the alignment that matched them and merged with a
+    union-find; each connected component is one recording. A component is `known` when any of
+    its members overlaps a ground-truth span — because a campaign the model has already read
+    once is already in the library, wherever else it turns up.
+    """
+    ensure_schema(conn)
+    query = "SELECT id FROM episodes WHERE audio_url IS NOT NULL"
+    params: tuple = ()
+    if episode_ids is not None:
+        if not episode_ids:
+            return []
+        query += f" AND id IN ({','.join('?' * len(episode_ids))})"
+        params = tuple(episode_ids)
+    ids = [r[0] for r in conn.execute(query + " ORDER BY id", params)]
+
+    fps: dict[int, tuple[list[int], float]] = {}
+    for eid in ids:
+        audio = Path(data_dir) / "audio" / f"{eid}.mp3"
+        if not audio.exists():
+            continue
+        fp, duration = episode_fingerprint(conn, eid, audio)
+        if fp:
+            fps[eid] = (fp, duration)
+    if len(fps) < RECUR_MIN_EPISODES:
+        return []
+
+    index: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    ep_of_value: dict[int, set[int]] = defaultdict(set)
+    for eid, (fp, _) in fps.items():
+        for k, v in enumerate(fp):
+            index[v].append((eid, k))
+            ep_of_value[v].add(eid)
+    stop = {v for v, eps in ep_of_value.items() if len(eps) > STOP_EPISODE_FRACTION * len(fps)}
+    library = Library(index=dict(index), stop=stop,
+                      ad_episode={e: e for e in fps}, n_episodes=len(fps))
+    runs, links = _runs_by_episode(fps, library, MATCH_FRAMES, BRIDGE_FRAMES, MIN_REGION_FRAMES)
+
+    parent: dict[tuple[int, int], tuple[int, int]] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for eid, kept in links.items():
+        for other, offset, frame in kept:
+            qi = _run_index(runs[eid], frame)
+            oi = _run_index(runs.get(other, []), frame - offset)
+            if qi is not None and oi is not None:
+                union((eid, qi), (other, oi))
+
+    groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for eid, rs in runs.items():
+        for k in range(len(rs)):
+            groups[find((eid, k))].append((eid, k))
+
+    # ground-truth spans, for the `known` test
+    placeholders = ",".join("?" * len(sources))
+    confirmed: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for r in conn.execute(
+        f"SELECT episode_id, start_second, end_second FROM ad_segments "
+        f"WHERE source IN ({placeholders})", sources):
+        confirmed[r[0]].append((r[1], r[2]))
+
+    campaigns: list[Campaign] = []
+    for members in groups.values():
+        eps = sorted({eid for eid, _ in members})
+        best = max(members, key=lambda m: runs[m[0]][m[1]][1] - runs[m[0]][m[1]][0])
+        eid, k = best
+        a, b = runs[eid][k]
+        per_frame = fps[eid][1] / len(fps[eid][0])
+        start, end = a * per_frame, (b + 1) * per_frame
+        known = any(
+            any(e2 > s1 and s2 < e1 for s1, e1 in confirmed.get(e2_id, []))
+            for e2_id, kk in members
+            for s2, e2 in [(runs[e2_id][kk][0] * (fps[e2_id][1] / len(fps[e2_id][0])),
+                            (runs[e2_id][kk][1] + 1) * (fps[e2_id][1] / len(fps[e2_id][0])))]
+        )
+        campaigns.append(Campaign(episodes=eps, representative=(eid, start, end), known=known))
+    # A cluster spanning most of the feed is the show's OWN recurring content — an intro, a
+    # sting, a standing sign-off — not a rotating campaign. The same reasoning the frequency
+    # stop-list applies to single fingerprint values applies to a whole cluster, and it is
+    # needed twice over here: union-find chains regions transitively, so one shared music bed
+    # can fuse otherwise-unrelated regions into a single component spanning every episode.
+    # Measured on 40 Casual Criminalist episodes: without this, the largest "campaign" had a
+    # reach of 40/40 and dragged junk (silent and music-only regions) into the selection.
+    ceiling = STOP_EPISODE_FRACTION * len(fps)
+    campaigns = [c for c in campaigns if c.reach <= ceiling]
+    campaigns.sort(key=lambda c: (-c.reach, c.representative[0]))
+    return campaigns
+
+
+def select_seed_episodes(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    episode_ids: list[int] | None = None,
+    limit: int | None = None,
+) -> list[tuple[int, int]]:
+    """Fewest episodes to read so every UNKNOWN campaign gets confirmed once. Greedy set cover.
+
+    This is the selector to spend a model budget through. `repeats.prioritize_pending` ranks by
+    how far an episode's ad COUNT sits from its show's median — its own docstring concedes a
+    matching count means matching quantity, not content. Counting is a proxy; this is the thing
+    itself: campaigns, deduplicated across episodes, minus the ones already read.
+
+    An episode carrying three unread campaigns is worth three times one carrying a single
+    campaign, and reading it retires all three at once — which is why this is set cover and not
+    a ranking. Returns (episode_id, campaigns_covered) in the order they should be read.
+    """
+    campaigns = [c for c in find_campaigns(conn, data_dir, episode_ids) if not c.known]
+    remaining = {i: set(c.episodes) for i, c in enumerate(campaigns)}
+    picked: list[tuple[int, int]] = []
+    while remaining:
+        by_episode: dict[int, int] = defaultdict(int)
+        for eps in remaining.values():
+            for e in eps:
+                by_episode[e] += 1
+        if not by_episode:
+            break
+        # most unread campaigns first; lowest episode id breaks ties for determinism
+        eid = min(by_episode, key=lambda e: (-by_episode[e], e))
+        covered = by_episode[eid]
+        picked.append((eid, covered))
+        remaining = {i: eps for i, eps in remaining.items() if eid not in eps}
+        if limit and len(picked) >= limit:
+            break
+    return picked
+
+
+@dataclass
 class FingerprintResult:
     episode_id: int
     title: str

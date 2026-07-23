@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-23
+
+### Added
+
+- **Campaign-level selection: `find_campaigns` / `select_seed_episodes`.** `discover_recurring`
+  answers "where does this episode repeat itself?", per episode — the wrong unit for spending a
+  model budget, because twelve episodes carrying one sponsor read look like twelve findings when
+  reading any ONE teaches the library all twelve. Recurring regions are now linked across
+  episodes by the alignment that matched them and merged with a union-find, so each connected
+  component is one ad RECORDING. A component is `known` when any member overlaps a ground-truth
+  span — a campaign read once is in the library wherever else it appears.
+  - `select_seed_episodes` is greedy set cover over the UNKNOWN campaigns: the fewest episodes
+    that confirm every recording the library doesn't have. An episode carrying three unread
+    campaigns retires all three in one read, which is why it's cover and not a ranking. This
+    supersedes `repeats.prioritize_pending` wherever audio exists — that ranks by how far an
+    episode's ad COUNT sits from its show's median, and its own docstring concedes a matching
+    count means matching quantity, not content.
+  - **A cluster spanning more than `STOP_EPISODE_FRACTION` of the feed is dropped** as the
+    show's own recurring content. Needed twice over: union-find chains regions transitively, so
+    one shared music bed can fuse unrelated regions into a component spanning every episode.
+    Measured on 40 Casual Criminalist episodes — without the ceiling the largest "campaign" had
+    a reach of 40/40 and dragged silent and music-only regions into the selection.
+  - Measured on those same 40 episodes: **11 campaigns, 7 episodes to read** (Pepsi, SimpliSafe,
+    Flexcar, Quicksilver, Hershey's, and Shopify as three distinct recordings — that feed
+    re-records it, so each take is its own campaign).
+  - **Known blind spot:** a single recording running in more than `STOP_EPISODE_FRACTION` of a
+    feed is invisible to self-recurrence. Real campaigns usually fragment into creative variants
+    that each stay a minority, which is why this is survivable rather than fatal.
+
+
 ## [0.8.0] - 2026-07-23
 
 ### Changed (breaking for AdSpanDetector implementors)

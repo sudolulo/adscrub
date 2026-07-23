@@ -379,3 +379,117 @@ def test_discover_is_idempotent(coldstart):
         fingerprint.discover_recurring(conn, data_dir)
     assert conn.execute("SELECT COUNT(*) c FROM ad_segments WHERE episode_id=? AND source='recur'",
                         (eids[0],)).fetchone()["c"] == 1
+
+
+# --- campaign clustering + seed selection ---
+
+
+@pytest.fixture
+def campaigns_corpus(conn, data_dir, monkeypatch):
+    """12 episodes. Campaign A in eps 0-2, B in eps 2-4 (ep2 carries BOTH), C in eps 5-6.
+    Plus a shared intro in every episode (must be stop-listed).
+
+    Reach is kept a MINORITY on purpose: a single recording appearing in more than
+    STOP_EPISODE_FRACTION of a feed is dropped as a common bed — see
+    test_a_recording_in_most_episodes_is_invisible below."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    eids = [_seed(conn, data_dir, f"c-{i}") for i in range(12)]
+    INTRO = list(range(7000, 7100))
+    A = list(range(10_000, 10_120))
+    B = list(range(20_000, 20_120))
+    C = list(range(30_000, 30_120))
+    pos = {e: i for i, e in enumerate(eids)}
+
+    def fake_fpcalc(path, length=fingerprint.FP_LENGTH):
+        eid = int(str(path).rsplit("/", 1)[-1].split(".")[0])
+        i = pos[eid]
+        # per-episode filler separates the two campaigns ep2 carries, so they are distinct
+        # runs rather than one contiguous block (ads in a break are separated by a beat)
+        gap = list(range(950_000 + i * 1000, 950_000 + i * 1000 + 60))
+        out = INTRO + list(range(900_000 + i * 1000, 900_000 + i * 1000 + 150))
+        if i in (0, 1, 2): out = out + A
+        if i in (2, 3, 4): out = out + gap + B
+        if i in (5, 6): out = out + C
+        return out
+
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    monkeypatch.setattr(fingerprint, "_fpcalc", fake_fpcalc)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 100.0)
+    return conn, data_dir, eids
+
+
+def test_finds_one_campaign_per_recording_not_per_episode(campaigns_corpus):
+    """7 episodes carrying 3 recordings must yield 3 campaigns, not 7 findings."""
+    conn, data_dir, eids = campaigns_corpus
+    camps = fingerprint.find_campaigns(conn, data_dir)
+    assert len(camps) == 3
+    assert sorted(c.reach for c in camps) == [2, 3, 3]
+
+
+def test_campaign_records_every_episode_carrying_it(campaigns_corpus):
+    conn, data_dir, eids = campaigns_corpus
+    reaches = {tuple(c.episodes) for c in fingerprint.find_campaigns(conn, data_dir)}
+    assert tuple(eids[0:3]) in reaches      # campaign A
+    assert tuple(eids[2:5]) in reaches      # campaign B
+    assert tuple(eids[5:7]) in reaches      # campaign C
+
+
+def test_seed_selection_covers_every_campaign_with_fewest_episodes(campaigns_corpus):
+    """ep2 carries two campaigns — a good selector reads it once and retires both, then needs
+    only one more episode for C. Three campaigns, two model calls."""
+    conn, data_dir, eids = campaigns_corpus
+    picked = fingerprint.select_seed_episodes(conn, data_dir)
+    assert len(picked) == 2, picked
+    assert picked[0] == (eids[2], 2)        # highest-yield episode first
+    assert picked[1][1] == 1
+
+
+def test_a_recording_in_most_episodes_is_invisible(conn, data_dir, monkeypatch):
+    """Honest limitation: self-recurrence cannot see a recording that runs in more than
+    STOP_EPISODE_FRACTION of the feed — the frequency stop-list drops it as a bed. Real
+    campaigns usually fragment into creative variants that each stay a minority, which is why
+    this is survivable, but a single ad in every episode is a genuine blind spot."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    eids = [_seed(conn, data_dir, f"u-{i}") for i in range(10)]
+    UBIQ = list(range(40_000, 40_120))
+    pos = {e: i for i, e in enumerate(eids)}
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 100.0)
+    monkeypatch.setattr(fingerprint, "_fpcalc", lambda path, length=fingerprint.FP_LENGTH: (
+        list(range(900_000 + pos[int(str(path).rsplit("/", 1)[-1].split(".")[0])] * 1000,
+                   900_000 + pos[int(str(path).rsplit("/", 1)[-1].split(".")[0])] * 1000 + 150))
+        + UBIQ))
+    assert fingerprint.find_campaigns(conn, data_dir) == []
+
+
+def test_already_read_campaigns_are_not_selected_again(campaigns_corpus):
+    """A campaign overlapping a ground-truth span is in the library already — reading another
+    episode of it teaches nothing, so it must drop out of the selection."""
+    conn, data_dir, eids = campaigns_corpus
+    before = fingerprint.select_seed_episodes(conn, data_dir)
+    assert len(before) == 2
+    target = next(c for c in fingerprint.find_campaigns(conn, data_dir)
+                  if tuple(c.episodes) == tuple(eids[5:7]))          # campaign C
+    eid, start, end = target.representative
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (?, ?, ?, 'llm')", (eid, start, end))
+    conn.commit()
+    assert any(c.known for c in fingerprint.find_campaigns(conn, data_dir))
+    after = fingerprint.select_seed_episodes(conn, data_dir)
+    assert len(after) == 1                                            # C no longer needs reading
+    assert after[0][0] == eids[2]
+
+
+def test_seed_selection_respects_limit(campaigns_corpus):
+    conn, data_dir, eids = campaigns_corpus
+    assert len(fingerprint.select_seed_episodes(conn, data_dir, limit=1)) == 1
+
+
+def test_no_campaigns_below_the_episode_floor(conn, data_dir, monkeypatch):
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 100.0)
+    monkeypatch.setattr(fingerprint, "_fpcalc", lambda p, length=fingerprint.FP_LENGTH: [1, 2, 3])
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    _seed(conn, data_dir, "lonely")
+    assert fingerprint.find_campaigns(conn, data_dir) == []
+    assert fingerprint.select_seed_episodes(conn, data_dir) == []
