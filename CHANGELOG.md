@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-23
+
 ### Added
 
 - **`fingerprint` tier — acoustic ad recognition** (`fingerprint.py`, `adscrub
@@ -42,9 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Emit floor (`MIN_REGION_FRAMES`, ~10s) drops the short music/filler fragments that were
     the tier's main false positives. Swept against ground truth: costs 0.2pp of recall
     (89.8% -> 89.6%) for ~12% less false-positive time; past ~15s real short ads start dying.
-  - Not yet wired into `cut`/hark or run as an unsupervised auto-cut: residual false
-    positives are short (~10s) fragments plus the occasional shared music bed, so a
-    min-region guard and a review pass are the precision follow-ups.
+  - `fpmatch` spans ARE cut (see `cut.CUT_SOURCES` below); hark wrappers are not built yet.
+    Residual false positives are short fragments and the occasional shared music bed; the
+    emit floor handles the former, the latter is unsolved.
 
 - **The model is now only sent transcript it hasn't already had explained to it.**
   `detect_episode` computes `covered_segment_indices` (segments inside ANY tier's ad span) and
@@ -70,8 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Taco Bell). It recovered that feed's DAI inserts and NOT its host-read Shopify spot — which
     is the expected split, and matches the probe below.
   - Spans are `recur`: INFERENCE, absent from both `GROUND_TRUTH_SOURCES` and
-    `FP_LIBRARY_SOURCES`. `cut` acts on every row regardless of source, so enabling this accepts
-    that roughly 1 flagged region in 10 may not be an ad.
+    `FP_LIBRARY_SOURCES`, and NOT in `cut.CUT_SOURCES` — roughly 1 flagged region in 10 is not
+    an ad, so they are not cut unless asked for explicitly (`adscrub cut --sources ...`).
 
 - **Measured: being host-read is not what defeats fingerprinting — being re-*read* is.** A
   host-read spot recorded once and re-rolled across a flight is one recording and matches like
