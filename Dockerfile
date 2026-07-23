@@ -37,7 +37,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # gosu drops from root to the unprivileged `adscrub` user after the entrypoint fixes
 # ownership of /app/data. uid/gid 568 matches TrueNAS SCALE's standard "apps" account,
 # same convention as hark/tiltmeter.
-RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg \
+# libchromaprint-tools provides fpcalc, which the `fingerprint`/`discover` tiers shell out to.
+# Without it those tiers are not broken so much as INERT: fpcalc_available() returns False, the
+# command exits with a tidy message, and an image that looks healthy silently never matches an
+# ad. A missing system binary is the whole difference between the cheap tiers running and not.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu ffmpeg libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 568 adscrub \
     && useradd --system --uid 568 --gid 568 --no-create-home adscrub

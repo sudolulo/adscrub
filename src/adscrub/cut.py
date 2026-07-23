@@ -43,6 +43,75 @@ from .db import utcnow
 CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch")
 
 
+# How far an ad edge may be moved to land on silence. Ad breaks are bounded by a beat of
+# silence, so the true boundary is nearly always within a second or two of the detected one.
+SNAP_WINDOW = 2.5
+SILENCE_DB = -35        # ffmpeg silencedetect threshold
+SILENCE_MIN = 0.30      # ignore pauses shorter than this; mid-sentence breaths are not boundaries
+
+
+def detect_silences(
+    audio_path: Path, noise_db: int = SILENCE_DB, min_duration: float = SILENCE_MIN
+) -> list[tuple[float, float]]:
+    """Silent intervals in the file, via one ffmpeg silencedetect pass."""
+    proc = subprocess.run(
+        ["ffmpeg", "-nostdin", "-i", str(audio_path),
+         "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences: list[tuple[float, float]] = []
+    start: float | None = None
+    for line in proc.stderr.splitlines():
+        if "silence_start:" in line:
+            try:
+                start = float(line.split("silence_start:")[1].split()[0])
+            except (IndexError, ValueError):
+                start = None
+        elif "silence_end:" in line and start is not None:
+            try:
+                silences.append((start, float(line.split("silence_end:")[1].split()[0])))
+            except (IndexError, ValueError):
+                pass
+            start = None
+    return silences
+
+
+def snap_spans_to_silence(
+    spans: list[tuple[float, float]],
+    silences: list[tuple[float, float]],
+    window: float = SNAP_WINDOW,
+) -> list[tuple[float, float]]:
+    """Pull each ad edge INWARD onto silence, so a cut never runs into speech.
+
+    Why this exists, from a real cut: a fingerprint match ends where the ad RECORDING stops
+    being recognisable, not where the break ends. On Casefile episode 1 that left the edge 2.3s
+    inside the resumed narration, so the cut ate the opening of "It was 405 on the morning of
+    Thursday, June 19, 2014" — invisible to every detection metric, obvious to a listener.
+
+    Snapping to the NEAREST silence was tried first and measured worse (2.3s -> 2.88s clipped):
+    the closest silence to that edge was a pause *within* the narration, and "nearest" has no
+    idea which side of the edge is ad and which is content. Direction is the whole fix — starts
+    only move later, ends only move earlier, so a span can shrink and never grow. That biases
+    every error towards leaving a sliver of ad rather than deleting a sentence, which is the
+    right way round: the leftover ad is audible and harmless, the deleted words are gone.
+
+    An edge with no silence within `window` is left exactly where it was.
+    """
+    if not silences:
+        return list(spans)
+    edges = sorted(s for pair in silences for s in pair)
+
+    out: list[tuple[float, float]] = []
+    for start, end in spans:
+        later = [x for x in edges if start <= x <= start + window]
+        earlier = [x for x in edges if end - window <= x <= end]
+        new_start = min(later) if later else start
+        new_end = max(earlier) if earlier else end
+        # shrinking must never invert or empty the span
+        out.append((new_start, new_end) if new_end > new_start else (start, end))
+    return out
+
+
 def compute_keep_spans(
     ad_spans: list[tuple[float, float]], duration: float
 ) -> list[tuple[float, float]]:
@@ -155,6 +224,9 @@ def cut_episode(
             (episode["id"], *sources),
         )
     ]
+    # A detected edge is where the ad stopped being RECOGNISABLE, which is not quite where the
+    # break ends; snapping to real silence keeps the cut off the first words of returning content.
+    ad_spans = snap_spans_to_silence(ad_spans, detect_silences(audio_path))
     keep_spans = compute_keep_spans(ad_spans, duration)
     ad_seconds = duration - sum(end - start for start, end in keep_spans)
 

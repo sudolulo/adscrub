@@ -96,6 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fpcalc` is now installed in the image.** The Dockerfile installed `ffmpeg` but not
+  `libchromaprint-tools`, so in any deploy the `fingerprint`/`discover` tiers were not broken but
+  INERT: `fpcalc_available()` returned False, the command exited with a tidy message, and a
+  healthy-looking image silently never matched an ad.
+
+- **Cut edges are pulled inward onto silence (`snap_spans_to_silence`).** Found by cutting a real
+  episode rather than by any metric: a fingerprint match ends where the ad stops being
+  *recognisable*, not where the break ends, which left one edge 2.3s inside the resumed narration
+  and ate the opening of "It was 405 on the morning of Thursday, June 19, 2014".
+  - Snapping to the NEAREST silence was tried first and measured **worse** (2.3s → 2.88s
+    clipped): the closest silence was a pause *within* the narration. Direction is the fix —
+    starts only move later, ends only move earlier, so a span can shrink and never grow, and
+    every error leaves a sliver of ad rather than deleting a sentence.
+  - **Known limit:** it only helps where silence exists. On that same episode it tightened 3 of 5
+    edges but left the 2.31s clip untouched, because the ad→narration transition has no
+    detectable pause. The residual is a detection-edge problem (likely `BRIDGE_FRAMES` extending
+    a run), not a cut problem, and is not solved here.
+
 - **`cut` no longer removes audio on the strength of any span it can find.** It selected every
   `ad_segments` row regardless of source, so the new discovery tiers would have silently started
   deleting audio: `dai` spans whose END is only an upper bound (over-cutting into editorial

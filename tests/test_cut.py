@@ -243,3 +243,53 @@ def test_untrusted_spans_are_not_removed_from_audio(tmp_path):
 def test_cut_sources_excludes_the_edge_unsafe_tiers():
     assert "dai" not in cut.CUT_SOURCES and "recur" not in cut.CUT_SOURCES
     assert {"chapter", "llm", "repeat", "fpmatch"} == set(cut.CUT_SOURCES)
+
+
+# --- snapping cut edges to silence ---
+
+SIL = [(100.0, 101.0), (200.0, 201.5), (400.0, 400.4)]
+
+
+def test_snaps_an_edge_that_lands_inside_speech():
+    """The real defect: a fingerprint edge 2.3s inside resumed narration clipped its first words."""
+    assert cut.snap_spans_to_silence([(99.5, 202.0)], SIL) == [(100.0, 201.5)]
+
+
+def test_only_ever_shrinks_a_span():
+    """Snapping to the NEAREST silence was measured worse on real audio (2.3s -> 2.88s clipped):
+    the closest silence was a pause inside the narration. Starts may only move later and ends
+    only earlier, so every error leaves a sliver of ad instead of deleting a sentence."""
+    start, end = cut.snap_spans_to_silence([(100.6, 199.0)], SIL)[0]
+    assert start >= 100.6 and end <= 199.0
+    # a silence just PAST the end must not be allowed to extend the cut into speech
+    assert cut.snap_spans_to_silence([(99.5, 199.0)], SIL)[0][1] <= 199.0
+
+
+def test_leaves_edges_with_no_silence_nearby_alone():
+    """Guessing further than the evidence reaches is how you start deleting content."""
+    assert cut.snap_spans_to_silence([(500.0, 600.0)], SIL) == [(500.0, 600.0)]
+
+
+def test_respects_the_snap_window():
+    far = [(100.0, 600.0)]
+    assert cut.snap_spans_to_silence(far, SIL, window=0.1) == far
+
+
+def test_never_inverts_or_empties_a_span():
+    """Two edges snapping onto the same silence must not produce a zero/negative span."""
+    out = cut.snap_spans_to_silence([(400.1, 400.3)], SIL)
+    assert out[0][1] > out[0][0]
+
+
+def test_no_silences_detected_is_a_no_op():
+    spans = [(10.0, 20.0)]
+    assert cut.snap_spans_to_silence(spans, []) == spans
+
+
+def test_parses_ffmpeg_silencedetect_output(monkeypatch):
+    class P:
+        stderr = ("[silencedetect] silence_start: 12.5\n"
+                  "[silencedetect] silence_end: 13.25 | silence_duration: 0.75\n"
+                  "[silencedetect] silence_start: 40.0\n")  # unterminated -> ignored
+    monkeypatch.setattr(cut.subprocess, "run", lambda *a, **k: P())
+    assert cut.detect_silences(cut.Path("x.mp3")) == [(12.5, 13.25)]
