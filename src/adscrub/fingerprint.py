@@ -525,6 +525,7 @@ def discover_recurring(
     data_dir: Path = DEFAULT_DATA_DIR,
     limit: int | None = None,
     on_result: Callable[[DiscoverResult], None] | None = None,
+    episode_ids: list[int] | None = None,
 ) -> list[DiscoverResult]:
     """COLD START: find a feed's ads with no confirmed ads to match against — none at all.
 
@@ -549,12 +550,22 @@ def discover_recurring(
     repeats.py was bitten by. Note that `cut` acts on every ad_segments row regardless of source,
     so enabling this on a feed accepts that ~1 flagged region in 10 may not be an ad.
     """
+    # `episode_ids` scopes the sweep to one feed. A caller with many shows in one database
+    # (hark) needs that: recurrence is measured against whatever set is passed, so handing it
+    # 27,000 episodes across 70 unrelated feeds would build one enormous index and compute the
+    # stop-list fraction over a corpus that shares no ad pool.
     ensure_schema(conn)
-    query = "SELECT id, title, audio_url FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
+    query = "SELECT id, title, audio_url FROM episodes WHERE audio_url IS NOT NULL"
     params: tuple = ()
+    if episode_ids is not None:
+        if not episode_ids:
+            return []
+        query += f" AND id IN ({','.join('?' * len(episode_ids))})"
+        params += tuple(episode_ids)
+    query += " ORDER BY id"
     if limit:
         query += " LIMIT ?"
-        params = (limit,)
+        params += (limit,)
     rows = conn.execute(query, params).fetchall()
     if len(rows) < RECUR_MIN_EPISODES:
         return []

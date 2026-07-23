@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-07-23
 
+### Changed (breaking for AdSpanDetector implementors)
+
+- **`AdSpanDetector.detect` takes a second argument**, `skip: frozenset[int] = frozenset()`.
+  `LayeredDetector` passes it positionally, so any detector defined outside this package must
+  accept it — a two-argument `detect(self, transcript)` now raises `TypeError` at run time.
+  Caught by hark's own `_PrecomputedDetector`, which implements this protocol; downstream
+  consumers pinned to adscrub main must update in the same step as the upgrade. Implementors
+  with nothing to gain from it (anything that isn't billed per token) should accept and ignore it.
+
 ### Added
 
 - **`fingerprint` tier — acoustic ad recognition** (`fingerprint.py`, `adscrub
