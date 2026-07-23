@@ -215,6 +215,31 @@ def _fingerprint_region(audio_path: str | Path, start: float, end: float) -> lis
         os.unlink(wav)
 
 
+def cached_fingerprint(
+    conn: sqlite3.Connection, episode_id: int, data_dir: Path = DEFAULT_DATA_DIR
+) -> tuple[list[int], float] | None:
+    """An episode's fingerprint from the cache, falling back to local audio, else None.
+
+    The cache is consulted FIRST and is sufficient on its own. That is the whole point of
+    storing fingerprints: an episode indexed once — from a file or straight off the network via
+    stream_episode_fingerprint — never needs its audio again for matching or discovery. Checking
+    the filesystem first would quietly require keeping the very thing the index exists to
+    replace, and a corpus streamed-and-discarded would look empty.
+    """
+    ensure_schema(conn)
+    row = conn.execute(
+        "SELECT fingerprint, duration FROM episode_fingerprints WHERE episode_id = ?",
+        (episode_id,),
+    ).fetchone()
+    if row:
+        return _parse_fingerprint(row[0]), row[1]
+    audio = Path(data_dir) / "audio" / f"{episode_id}.mp3"
+    if not audio.exists():
+        return None
+    fp, duration = episode_fingerprint(conn, episode_id, audio)
+    return (fp, duration) if fp else None
+
+
 def stream_episode_fingerprint(
     conn: sqlite3.Connection, episode_id: int, audio_url: str, client
 ) -> tuple[list[int], float]:
@@ -653,12 +678,9 @@ def discover_recurring(
 
     fps: dict[int, tuple[list[int], float]] = {}
     for row in rows:
-        audio = Path(data_dir) / "audio" / f"{row['id']}.mp3"
-        if not audio.exists():
-            continue  # costs coverage, never correctness
-        fp, duration = episode_fingerprint(conn, row["id"], audio)
-        if fp:
-            fps[row["id"]] = (fp, duration)
+        got = cached_fingerprint(conn, row["id"], data_dir)
+        if got:  # missing fingerprint AND missing audio costs coverage, never correctness
+            fps[row["id"]] = got
     if len(fps) < RECUR_MIN_EPISODES:
         return []
 
@@ -772,12 +794,9 @@ def find_campaigns(
 
     fps: dict[int, tuple[list[int], float]] = {}
     for eid in ids:
-        audio = Path(data_dir) / "audio" / f"{eid}.mp3"
-        if not audio.exists():
-            continue
-        fp, duration = episode_fingerprint(conn, eid, audio)
-        if fp:
-            fps[eid] = (fp, duration)
+        got = cached_fingerprint(conn, eid, data_dir)
+        if got:
+            fps[eid] = got
     if len(fps) < RECUR_MIN_EPISODES:
         return []
 

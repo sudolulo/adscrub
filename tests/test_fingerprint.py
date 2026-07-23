@@ -566,3 +566,30 @@ def test_stream_episode_fingerprint_caches_and_derives_duration(conn, data_dir, 
     monkeypatch.setattr(fingerprint, "stream_fingerprint", boom)
     again, _ = fingerprint.stream_episode_fingerprint(conn, eid, "http://f/a.mp3", client=None)
     assert again == fp
+
+
+def test_cached_fingerprint_needs_no_audio(conn, data_dir, monkeypatch):
+    """The whole point of the cache: an episode indexed once — from a file or straight off the
+    network — never needs its audio again for matching or discovery. Checking the filesystem
+    first would quietly require keeping the thing the index exists to replace."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
+    eid = _seed(conn, data_dir, "indexed")
+    conn.execute("INSERT INTO episode_fingerprints (episode_id, fingerprint, duration) "
+                 "VALUES (?, ?, ?)", (eid, ",".join(str(v) for v in AD), 42.0))
+    conn.commit()
+    (data_dir / "audio" / f"{eid}.mp3").unlink()          # audio thrown away
+
+    def boom(*a, **k):
+        raise AssertionError("touched the audio for an already-indexed episode")
+    monkeypatch.setattr(fingerprint, "_fpcalc", boom)
+    monkeypatch.setattr(fingerprint, "probe_duration", boom)
+
+    got = fingerprint.cached_fingerprint(conn, eid, data_dir)
+    assert got is not None and got[0] == AD and got[1] == 42.0
+
+
+def test_cached_fingerprint_is_none_without_cache_or_audio(conn, data_dir):
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
+    eid = _seed(conn, data_dir, "gone")
+    (data_dir / "audio" / f"{eid}.mp3").unlink()
+    assert fingerprint.cached_fingerprint(conn, eid, data_dir) is None

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-23
+
+### Fixed
+
+- **Campaign discovery consulted the filesystem before the cache**, so an already-indexed
+  corpus still demanded the audio the index exists to replace — a feed streamed-and-discarded
+  looked empty. `find_campaigns` and `discover_recurring` now go through the new
+  `cached_fingerprint`, which reads `episode_fingerprints` first and only falls back to local
+  audio when an episode has never been indexed. Verified end to end on 40 real episodes with
+  **zero audio files on disk**.
+
+
 ## [0.10.0] - 2026-07-23
 
 ### Added
