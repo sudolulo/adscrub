@@ -153,7 +153,7 @@ def test_layered_detector_unions_its_tiers(corpus):
     conn, a, b = corpus
 
     class Stub:
-        def detect(self, transcript):
+        def detect(self, transcript, skip=frozenset()):
             return [detect.DetectedAdSpan(0.0, 1.0, "chapter marker", source="chapter")]
 
     layered = detect.LayeredDetector(

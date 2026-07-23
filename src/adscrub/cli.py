@@ -1,14 +1,16 @@
-"""adscrub command line: add-feed, ingest, chapters, transcribe, repeats, detect, cut, serve, stats."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, repeats, fingerprint, detect, cut, serve, stats."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import httpx
 
-from . import __version__, chapters, cut, db, detect, feed, ingest, repeats, transcribe
+from . import (__version__, chapters, cut, dai, db, detect, feed, fingerprint, ingest, repeats,
+               transcribe)
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
@@ -116,6 +118,94 @@ def cmd_repeats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dai(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    data_dir = Path(args.data_dir)
+    rows = conn.execute(
+        "SELECT * FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
+        + (" LIMIT ?" if args.limit else ""),
+        (args.limit,) if args.limit else (),
+    ).fetchall()
+    if not rows:
+        print("no episodes with an audio_url", file=sys.stderr)
+        return 1
+    stored = 0
+    for ep in rows:
+        try:
+            r = dai.dai_episode(conn, ep, make_client, data_dir=data_dir)
+        except httpx.HTTPError as exc:
+            print(f"  FAIL  {ep['title']}: {exc}", file=sys.stderr)
+            continue
+        stored += r.stored
+        print(f"  {'ok  ' if r.stored else '..  '}  {ep['title']}: "
+              + ("server-inserted span stored" if r.stored else r.reason))
+    print(f"stored {stored} dai span(s) across {len(rows)} episode(s) — no transcript, no model")
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    if not fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+
+    def report(r: fingerprint.DiscoverResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} recurring region(s)")
+
+    results = fingerprint.discover_recurring(
+        conn, Path(args.data_dir), limit=args.limit, on_result=report)
+    if not results:
+        print(f"need at least {fingerprint.RECUR_MIN_EPISODES} downloaded episodes to tell "
+              "recurring audio from episode content", file=sys.stderr)
+        return 1
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"found {found} recurring region(s) across {hit} of {len(results)} episode(s) — "
+          "no library, no transcript, no model. These are INFERENCE (source='recur'): they are "
+          "cut like any other span, and roughly 1 in 10 may not be an ad.")
+    return 0
+
+
+def cmd_fingerprint(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    if not fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+    data_dir = Path(args.data_dir)
+
+    def progress(n: int, total: int) -> None:
+        if n == 1 or n % 25 == 0 or n == total:
+            print(f"  ..    building library: fingerprinted {n}/{total} confirmed ad read(s)",
+                  file=sys.stderr)
+
+    library = fingerprint.build_library(conn, data_dir, on_progress=progress)
+    if not library:
+        print("no confirmed ad recordings yet — chapters/transcribe+LLM (or dai) has to go first",
+              file=sys.stderr)
+        return 1
+
+    def report(r: fingerprint.FingerprintResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} fingerprinted ad span(s)")
+
+    with make_client() as client:
+        results = fingerprint.apply_fingerprints(
+            conn, client, data_dir=data_dir, limit=args.limit, on_result=report
+        )
+    errors = sum(1 for r in results if r.error)
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"matched {found} ad span(s) across {hit} of {len(results)} episode(s) "
+          f"({errors} failed) — {library.n_episodes} source episode(s) in the library, "
+          f"no transcript or model")
+    return 0
+
+
 def cmd_detect(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     pending = detect.pending_episodes(conn, args.limit)
@@ -164,9 +254,10 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
 def cmd_cut(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = cut.pending_episodes(conn, args.limit)
+    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    pending = cut.pending_episodes(conn, args.limit, sources)
     if args.dry_run:
-        total_pending = len(cut.pending_episodes(conn))
+        total_pending = len(cut.pending_episodes(conn, sources=sources))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
@@ -181,9 +272,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
             print(f"  ok    {r.title}: removed {r.ad_seconds:.1f}s of ads")
 
     with make_client() as client:
-        results = cut.cut_pending(conn, client, limit=args.limit, on_result=report)
+        results = cut.cut_pending(conn, client, limit=args.limit, on_result=report,
+                                  sources=sources)
     errors = sum(1 for r in results if r.error)
-    remaining = len(cut.pending_episodes(conn))
+    remaining = len(cut.pending_episodes(conn, sources=sources))
     print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
@@ -250,6 +342,32 @@ def main(argv: list[str] | None = None) -> int:
                    help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
     p.set_defaults(func=cmd_repeats)
 
+    p = sub.add_parser(
+        "dai", help="probe episodes for dynamically-inserted ads and store what diverged")
+    p.add_argument("--limit", type=int, help="max episodes to probe this run")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_dai)
+
+    p = sub.add_parser(
+        "discover",
+        help="cold start: find ads on a feed with NO confirmed ads, by matching it against itself")
+    p.add_argument("--limit", type=int, help="max episodes to consider")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_discover)
+
+    p = sub.add_parser(
+        "fingerprint",
+        help="match episode AUDIO against confirmed ad recordings (free, no transcript or model)")
+    p.add_argument("--limit", type=int,
+                   help="scan only the first N episodes by id — ad-hoc/testing only. Like "
+                        "repeats there is no pending-queue (re-scanning is free, the library "
+                        "grows), so the pipeline runs this UNBOUNDED.")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_fingerprint)
+
     p = sub.add_parser("detect", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
     p.add_argument("--model", default=detect.DEFAULT_MODEL,
@@ -260,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("cut", help="cut ad spans out of episode audio with ffmpeg")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--sources", default=",".join(cut.CUT_SOURCES),
+                   help="comma-separated ad_segments sources to actually remove (default: "
+                        + ",".join(cut.CUT_SOURCES) + "). `dai` and `recur` are excluded by "
+                        "default: they find ads well but do not pin the edges, so cutting them "
+                        "eats into editorial. Add them only deliberately.")
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_cut)

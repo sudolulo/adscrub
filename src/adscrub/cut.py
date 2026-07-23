@@ -27,6 +27,96 @@ from .audio import DEFAULT_DATA_DIR, download_audio, probe_duration
 from .db import utcnow
 
 
+# Which sources are trusted to REMOVE AUDIO. The test is not "is this span evidence or
+# inference" — `repeat` and `fpmatch` are inference and are exactly what the cheap tiers exist to
+# cut. The test is whether the span's BOUNDARIES are grounded in something precise:
+#   chapter  publisher-provided markers
+#   llm      grounded in the transcript's own segment timestamps
+#   repeat   same, via matched segments
+#   fpmatch  grounded in audio alignment against a confirmed recording
+# Excluded by default, because their edges are not:
+#   dai      byte-derived; its END is only an upper bound (see dai.dai_episode), so cutting it
+#            would eat into editorial either side of the real insert
+#   recur    cold-start self-recurrence; roughly 1 flagged region in 10 is not an ad at all
+# Both stay valuable for SEEDING and DISCOVERY, which is a different job from cutting. Opt in
+# deliberately (`--sources`) if you want them cut anyway.
+CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch")
+
+
+# How far an ad edge may be moved to land on silence. Ad breaks are bounded by a beat of
+# silence, so the true boundary is nearly always within a second or two of the detected one.
+SNAP_WINDOW = 2.5
+SILENCE_DB = -35        # ffmpeg silencedetect threshold
+SILENCE_MIN = 0.30      # ignore pauses shorter than this; mid-sentence breaths are not boundaries
+
+
+def detect_silences(
+    audio_path: Path, noise_db: int = SILENCE_DB, min_duration: float = SILENCE_MIN
+) -> list[tuple[float, float]]:
+    """Silent intervals in the file, via one ffmpeg silencedetect pass."""
+    proc = subprocess.run(
+        ["ffmpeg", "-nostdin", "-i", str(audio_path),
+         "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences: list[tuple[float, float]] = []
+    start: float | None = None
+    for line in proc.stderr.splitlines():
+        if "silence_start:" in line:
+            try:
+                start = float(line.split("silence_start:")[1].split()[0])
+            except (IndexError, ValueError):
+                start = None
+        elif "silence_end:" in line and start is not None:
+            try:
+                silences.append((start, float(line.split("silence_end:")[1].split()[0])))
+            except (IndexError, ValueError):
+                pass
+            start = None
+    return silences
+
+
+def snap_spans_to_silence(
+    spans: list[tuple[float, float]],
+    silences: list[tuple[float, float]],
+    window: float = SNAP_WINDOW,
+) -> list[tuple[float, float]]:
+    """Pull each ad edge INWARD onto silence, so a cut never runs into speech.
+
+    A cut edge is a guess about where a break ends, and the failure that matters is running into
+    speech. Moving edges inward onto silence bounds that risk: on a real Casefile cut it tightened
+    3 of 5 edges by up to ~0.9s, and by construction it can only ever shrink what gets removed.
+
+    Direction is the whole point. Snapping to the NEAREST silence was tried first and measured
+    worse on real audio, because the closest silence to an edge is often a pause *inside* speech
+    and "nearest" has no idea which side of the edge is ad. Starts may only move later and ends
+    only earlier, so every error leaves a sliver of ad rather than deleting a sentence — the right
+    way round, since leftover ad is audible and harmless while deleted words are gone.
+
+    An edge with no silence within `window` is left exactly where it was.
+
+    NOT what this fixes, recorded because the first diagnosis was wrong: an edge on that episode
+    sat 2.3s past where Whisper timestamped the resumed narration, which looked like the cut
+    eating a sentence. It wasn't. Those frames match a confirmed ad recording from ANOTHER
+    episode densely (gaps of 1-3 frames), and this episode's narration is unique to it, so it
+    cannot match another episode's audio — the region is the ad's outro bed and Whisper simply
+    started the segment early. Whisper segment starts are not evidence of speech onset.
+    """
+    if not silences:
+        return list(spans)
+    edges = sorted(s for pair in silences for s in pair)
+
+    out: list[tuple[float, float]] = []
+    for start, end in spans:
+        later = [x for x in edges if start <= x <= start + window]
+        earlier = [x for x in edges if end - window <= x <= end]
+        new_start = min(later) if later else start
+        new_end = max(earlier) if earlier else end
+        # shrinking must never invert or empty the span
+        out.append((new_start, new_end) if new_end > new_start else (start, end))
+    return out
+
+
 def compute_keep_spans(
     ad_spans: list[tuple[float, float]], duration: float
 ) -> list[tuple[float, float]]:
@@ -86,18 +176,30 @@ class CutResult:
     error: str | None = None
 
 
-def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list[sqlite3.Row]:
-    """Episodes with at least one ad span found, not yet cut."""
-    query = """
+def pending_episodes(
+    conn: sqlite3.Connection,
+    limit: int | None = None,
+    sources: tuple[str, ...] = CUT_SOURCES,
+) -> list[sqlite3.Row]:
+    """Episodes with at least one CUTTABLE ad span, not yet cut.
+
+    Filtered by source for the same reason cut_episode is: an episode whose only spans came from
+    a discovery tier has nothing to remove, and treating it as pending would rewrite the file
+    unchanged and mark it done — retiring it from cutting for good once real spans arrive.
+    """
+    placeholders = ",".join("?" * len(sources))
+    query = f"""
         SELECT * FROM episodes
         WHERE cut_path IS NULL
-          AND EXISTS (SELECT 1 FROM ad_segments WHERE episode_id = episodes.id)
+          AND EXISTS (SELECT 1 FROM ad_segments
+                      WHERE episode_id = episodes.id AND source IN ({placeholders}))
         ORDER BY id
     """
+    params: tuple = tuple(sources)
     if limit:
         query += " LIMIT ?"
-        return conn.execute(query, (limit,)).fetchall()
-    return conn.execute(query).fetchall()
+        params += (limit,)
+    return conn.execute(query, params).fetchall()
 
 
 def cut_episode(
@@ -105,8 +207,12 @@ def cut_episode(
     episode: sqlite3.Row,
     client: httpx.Client,
     data_dir: Path = DEFAULT_DATA_DIR,
+    sources: tuple[str, ...] = CUT_SOURCES,
 ) -> tuple[Path, float]:
     """Download (if needed), cut ad spans out, update the episode row.
+
+    Only spans from `sources` are removed — see CUT_SOURCES for why a tier can be trusted to
+    find an ad without being trusted to say where it stops.
 
     Returns (cut_path, ad_seconds_removed).
     """
@@ -114,13 +220,18 @@ def cut_episode(
         client, episode["audio_url"], data_dir / "audio" / f"{episode['id']}.mp3"
     )
     duration = probe_duration(audio_path)
+    placeholders = ",".join("?" * len(sources))
     ad_spans = [
         (row["start_second"], row["end_second"])
         for row in conn.execute(
-            "SELECT start_second, end_second FROM ad_segments WHERE episode_id = ?",
-            (episode["id"],),
+            f"SELECT start_second, end_second FROM ad_segments "
+            f"WHERE episode_id = ? AND source IN ({placeholders})",
+            (episode["id"], *sources),
         )
     ]
+    # A detected edge is where the ad stopped being RECOGNISABLE, which is not quite where the
+    # break ends; snapping to real silence keeps the cut off the first words of returning content.
+    ad_spans = snap_spans_to_silence(ad_spans, detect_silences(audio_path))
     keep_spans = compute_keep_spans(ad_spans, duration)
     ad_seconds = duration - sum(end - start for start, end in keep_spans)
 
@@ -141,12 +252,13 @@ def cut_pending(
     data_dir: Path = DEFAULT_DATA_DIR,
     limit: int | None = None,
     on_result: Callable[[CutResult], None] | None = None,
+    sources: tuple[str, ...] = CUT_SOURCES,
 ) -> list[CutResult]:
     results: list[CutResult] = []
-    for row in pending_episodes(conn, limit):
+    for row in pending_episodes(conn, limit, sources):
         result = CutResult(episode_id=row["id"], title=row["title"] or "")
         try:
-            _path, ad_seconds = cut_episode(conn, row, client, data_dir)
+            _path, ad_seconds = cut_episode(conn, row, client, data_dir, sources)
             result.ad_seconds = ad_seconds
         except Exception as exc:  # noqa: BLE001 — per-episode isolation
             result.error = str(exc)

@@ -192,3 +192,106 @@ def test_cut_pending_isolates_per_episode_failures(conn, tmp_path, monkeypatch):
     assert cut.pending_episodes(conn) == [
         conn.execute("SELECT * FROM episodes WHERE guid = 'ep-2'").fetchone()
     ]
+
+
+# --- which sources are allowed to remove audio ---
+
+
+def _ep_with_span(conn, source, start=10.0, end=20.0):
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
+    conn.execute("INSERT INTO episodes (feed_id, guid, title, audio_url) "
+                 "VALUES (1, ?, ?, 'http://f/a.mp3')", (source, source))
+    eid = conn.execute("SELECT id FROM episodes WHERE guid=?", (source,)).fetchone()["id"]
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (?, ?, ?, ?)", (eid, start, end, source))
+    conn.commit()
+    return eid
+
+
+def test_discovery_only_episodes_are_not_pending(tmp_path):
+    """`recur`/`dai` find ads but don't pin the edges. An episode with only those has nothing
+    safe to remove — treating it as pending would rewrite the file unchanged and mark it done,
+    retiring it from cutting before real spans ever arrive."""
+    conn = db.connect(tmp_path / "t.db")
+    _ep_with_span(conn, "recur")
+    assert cut.pending_episodes(conn) == []
+    assert len(cut.pending_episodes(conn, sources=("recur",))) == 1  # opt in explicitly
+
+
+def test_trusted_sources_are_pending(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    _ep_with_span(conn, "fpmatch")
+    assert len(cut.pending_episodes(conn)) == 1
+
+
+def test_untrusted_spans_are_not_removed_from_audio(tmp_path):
+    """The real risk: a `recur` span sitting next to a trusted one must not widen the cut."""
+    conn = db.connect(tmp_path / "t.db")
+    eid = _ep_with_span(conn, "llm", 10.0, 20.0)
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (?, 30.0, 40.0, 'recur')", (eid,))
+    conn.commit()
+    rows = conn.execute(
+        "SELECT start_second, end_second FROM ad_segments WHERE episode_id=? AND source IN "
+        "(?,?,?,?)", (eid, *cut.CUT_SOURCES)).fetchall()
+    assert [(r["start_second"], r["end_second"]) for r in rows] == [(10.0, 20.0)]
+    # 30-40 survives in the audio because nothing trusted vouches for those edges
+    keep = cut.compute_keep_spans([(r["start_second"], r["end_second"]) for r in rows], 60.0)
+    assert (20.0, 60.0) in keep
+
+
+def test_cut_sources_excludes_the_edge_unsafe_tiers():
+    assert "dai" not in cut.CUT_SOURCES and "recur" not in cut.CUT_SOURCES
+    assert {"chapter", "llm", "repeat", "fpmatch"} == set(cut.CUT_SOURCES)
+
+
+# --- snapping cut edges to silence ---
+
+SIL = [(100.0, 101.0), (200.0, 201.5), (400.0, 400.4)]
+
+
+def test_snaps_an_edge_inward_onto_silence():
+    """A cut edge is a guess about where a break ends; moving it onto silence bounds the risk of
+    running into speech."""
+    assert cut.snap_spans_to_silence([(99.5, 202.0)], SIL) == [(100.0, 201.5)]
+
+
+def test_only_ever_shrinks_a_span():
+    """Snapping to the NEAREST silence was measured worse on real audio: the closest silence to an
+    edge is often a pause inside speech, and "nearest" cannot tell which side is ad. Starts may
+    only move later and ends only earlier, so every error leaves a sliver of ad instead of
+    deleting a sentence."""
+    start, end = cut.snap_spans_to_silence([(100.6, 199.0)], SIL)[0]
+    assert start >= 100.6 and end <= 199.0
+    # a silence just PAST the end must not be allowed to extend the cut into speech
+    assert cut.snap_spans_to_silence([(99.5, 199.0)], SIL)[0][1] <= 199.0
+
+
+def test_leaves_edges_with_no_silence_nearby_alone():
+    """Guessing further than the evidence reaches is how you start deleting content."""
+    assert cut.snap_spans_to_silence([(500.0, 600.0)], SIL) == [(500.0, 600.0)]
+
+
+def test_respects_the_snap_window():
+    far = [(100.0, 600.0)]
+    assert cut.snap_spans_to_silence(far, SIL, window=0.1) == far
+
+
+def test_never_inverts_or_empties_a_span():
+    """Two edges snapping onto the same silence must not produce a zero/negative span."""
+    out = cut.snap_spans_to_silence([(400.1, 400.3)], SIL)
+    assert out[0][1] > out[0][0]
+
+
+def test_no_silences_detected_is_a_no_op():
+    spans = [(10.0, 20.0)]
+    assert cut.snap_spans_to_silence(spans, []) == spans
+
+
+def test_parses_ffmpeg_silencedetect_output(monkeypatch):
+    class P:
+        stderr = ("[silencedetect] silence_start: 12.5\n"
+                  "[silencedetect] silence_end: 13.25 | silence_duration: 0.75\n"
+                  "[silencedetect] silence_start: 40.0\n")  # unterminated -> ignored
+    monkeypatch.setattr(cut.subprocess, "run", lambda *a, **k: P())
+    assert cut.detect_silences(cut.Path("x.mp3")) == [(12.5, 13.25)]

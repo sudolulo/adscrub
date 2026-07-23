@@ -156,7 +156,12 @@ class RepeatAdDetector:
     threshold: float = MATCH_THRESHOLD
     bridge_gap: int = BRIDGE_GAP
 
-    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[DetectedAdSpan]:
+        # `skip` is deliberately ignored: it exists so a per-token tier can look away from what
+        # is already covered, and this tier costs nothing to run. Re-examining a covered segment
+        # may legitimately widen a span the cheaper tier only partly caught.
         if not transcript or not self.library:
             return []
 

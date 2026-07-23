@@ -7,7 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-23
+
+### Changed (breaking for AdSpanDetector implementors)
+
+- **`AdSpanDetector.detect` takes a second argument**, `skip: frozenset[int] = frozenset()`.
+  `LayeredDetector` passes it positionally, so any detector defined outside this package must
+  accept it — a two-argument `detect(self, transcript)` now raises `TypeError` at run time.
+  Caught by hark's own `_PrecomputedDetector`, which implements this protocol; downstream
+  consumers pinned to adscrub main must update in the same step as the upgrade. Implementors
+  with nothing to gain from it (anything that isn't billed per token) should accept and ignore it.
+
+### Added
+
+- **`fingerprint` tier — acoustic ad recognition** (`fingerprint.py`, `adscrub
+  fingerprint`). Matches an episode's AUDIO against Chromaprint fingerprints of ad
+  recordings already confirmed elsewhere in the corpus (`llm`/`chapter` spans), so a
+  campaign confirmed once is cut with no transcript and no model — the cost lever
+  `repeats` structurally can't pull, since it needs the Whisper transcript first. Runs
+  before transcription: a sibling audio stage, not a transcript `AdSpanDetector`.
+  Whole-episode and ad-region fingerprints are both cached (`episode_fingerprints`,
+  `ad_fingerprints`), so re-scanning a grown library re-runs only cheap set-lookups, never
+  the decode. `fpmatch` spans are inference and never seed the library
+  (`GROUND_TRUTH_SOURCES` unchanged) — same discipline as `repeats`. Requires `fpcalc`
+  (Chromaprint); a clear error, not a crash, if it's absent.
+  - Measured leave-one-out on the live corpus (Casefile, 82 eps, 286 confirmed ads):
+    **89.1% of confirmed ad DURATION recovered from audio alone**, 0 episodes fully
+    missed (pilot slice-recovery 90.5% / 98.3% by duration, 0/82 non-ad control
+    false-match). The ~30% of detected time outside the LLM's own spans is mostly ads the
+    LLM silently missed, the same under-detection `repeats` was built to catch.
+  - Cross-show (The Casual Criminalist, 40 eps, **no ad labels**): the mechanism
+    generalises — 40/40 episodes carry recurring ad audio, verified as real ads
+    (Pepsi/Nordstrom/Netflix/Flexcar), ~75%+ of flagged time explicitly ad-marked. 13/40
+    episodes share the Flexcar DAI campaign with Casefile, caught cross-show from
+    Casefile's library with zero CC labels — a library from one show recognises another
+    show's ads when they share a programmatic campaign.
+  - **Stop-list: frequency proposes, editorial vetoes.** A value common across episodes is
+    only dropped if it ALSO appears in known non-ad audio, which is what distinguishes
+    silence/a music bed from a sponsor that simply runs in every episode. Measured on
+    Casefile: frequency alone 88.9% recall (but deletes any campaign in >30% of episodes —
+    Flexcar runs in 27/40 Casual Criminalist episodes); editorial alone 76.8% (far too
+    aggressive, 74,075 values stopped vs 1,173, because Chromaprint values collide between
+    ad and ordinary speech); **the intersection 89.6%, 669 stopped** — better recall than
+    either AND the ubiquitous sponsor survives.
+  - Emit floor (`MIN_REGION_FRAMES`, ~10s) drops the short music/filler fragments that were
+    the tier's main false positives. Swept against ground truth: costs 0.2pp of recall
+    (89.8% -> 89.6%) for ~12% less false-positive time; past ~15s real short ads start dying.
+  - `fpmatch` spans ARE cut (see `cut.CUT_SOURCES` below); hark wrappers are not built yet.
+    Residual false positives are short fragments and the occasional shared music bed; the
+    emit floor handles the former, the latter is unsolved.
+
+- **The model is now only sent transcript it hasn't already had explained to it.**
+  `detect_episode` computes `covered_segment_indices` (segments inside ANY tier's ad span) and
+  `_chunks` omits them, so an episode already 60% covered costs ~40% of the tokens it used to.
+  Omissions are replaced by an elision marker — without it the segments either side of a removed
+  ad read as adjacent and the model sees a seam that isn't there. Indices stay GLOBAL, so spans
+  still ground against the full transcript. `AdSpanDetector.detect` gained an optional `skip`
+  argument; free tiers (repeats) deliberately ignore it, since re-examining costs nothing and can
+  widen a span a cheaper tier only partly caught.
+
+- **Cold start: `fingerprint.discover_recurring` / `adscrub discover`.** The seeded tier can only
+  recognise campaigns something else already confirmed, which is useless on a new feed. This
+  matches a feed against ITSELF: audio recurring across otherwise-unrelated episodes is the
+  inserted material, not the content. Needs no library, no transcript and no model.
+  - The frequency stop-list is used ALONE here and that is correct — its usual weakness (a
+    sponsor in most episodes gets dropped) is the strength needed: the show's fixed intro/outro
+    recurs everywhere and must be ignored, a rotating campaign is a minority and survives. No
+    editorial veto is available, since deriving one needs the confirmed ads we don't have.
+  - `RECUR_MIN_EPISODES = 8`, and the floor is arithmetic: a campaign needs 2+ episodes to recur
+    but must stay under the ~30% frequency threshold, so discovery is impossible below ~7.
+  - Verified on The Casual Criminalist (40 episodes, zero labels): recurring audio in 40/40
+    episodes, 174 regions, ~211s/episode, reading as real ads (Pepsi, Mint Mobile, Mark Spain,
+    Taco Bell). It recovered that feed's DAI inserts and NOT its host-read Shopify spot — which
+    is the expected split, and matches the probe below.
+  - Spans are `recur`: INFERENCE, absent from both `GROUND_TRUTH_SOURCES` and
+    `FP_LIBRARY_SOURCES`, and NOT in `cut.CUT_SOURCES` — roughly 1 flagged region in 10 is not
+    an ad, so they are not cut unless asked for explicitly (`adscrub cut --sources ...`).
+
+- **Measured: being host-read is not what defeats fingerprinting — being re-*read* is.** A
+  host-read spot recorded once and re-rolled across a flight is one recording and matches like
+  any other insert. The Casual Criminalist re-records its Shopify read per episode: it appears in
+  33 of 40 episodes and matched 0/39, while a DAI insert from the same episode matched 2/39 and a
+  control editorial region matched 0/39. So the gap is per-show and worth measuring per feed
+  rather than assuming; `repeats` covers it, since the WORDS recur even when the recording doesn't.
+
+- **DAI probe results are now persisted** (`dai.dai_episode`, `adscrub dai`). The probe already
+  proved which bytes were server-inserted, and then threw the finding away — nothing was ever
+  written to `ad_segments`. Divergences are now stored as `dai` spans (byte offsets converted
+  through the file's average byte rate, trimmed at both ends, capped at one plausible ad break,
+  `confidence = 0.5`), giving ad discovery with **no transcript and no model**.
+  - The START is evidence; the END is only an upper bound, because the reconvergence anchor
+    locates where the two streams realign rather than where the insert stopped. So a `dai` span
+    seeds the AUDIO library (`FP_LIBRARY_SOURCES`) — where boundary slop is harmless, since
+    matching needs a long aligned run and any editorial bleed is what the stop-list removes —
+    but never the TEXT library (`repeats.GROUND_TRUTH_SOURCES` stays `llm`/`chapter`), where a
+    wrong boundary would teach the matcher editorial wording.
+  - A span is stored only when the probe both diverged AND realigned; without an end, storing
+    one would be a guess.
+
 ### Fixed
+
+- **`fpcalc` is now installed in the image.** The Dockerfile installed `ffmpeg` but not
+  `libchromaprint-tools`, so in any deploy the `fingerprint`/`discover` tiers were not broken but
+  INERT: `fpcalc_available()` returned False, the command exited with a tidy message, and a
+  healthy-looking image silently never matched an ad.
+
+- **Cut edges are pulled inward onto silence (`snap_spans_to_silence`).** A cut edge is a guess
+  about where a break ends, and the failure that matters is running into speech. On a real
+  Casefile cut this tightened 3 of 5 edges by up to ~0.9s, and by construction it can only ever
+  shrink what gets removed.
+  - Direction is the point. Snapping to the NEAREST silence was tried first and measured worse:
+    the closest silence to an edge is often a pause *inside* speech. Starts may only move later
+    and ends only earlier, so every error leaves a sliver of ad rather than deleting a sentence.
+  - **Correction to the previous entry for this change, which claimed the cut "ate the opening
+    of 'It was 405 on the morning of Thursday, June 19, 2014'". That was a misdiagnosis.** Those
+    frames match a confirmed ad recording from ANOTHER episode densely (gaps of 1-3 frames), and
+    an episode's narration is unique to it and cannot match another episode's audio — so the
+    region is the ad's outro bed, and Whisper had simply timestamped the segment early. Whisper
+    segment starts are not evidence of speech onset. No sentence was being deleted.
+  - **A match-density guard was measured and rejected.** Sparse, heavily-bridged regions looked
+    like the signature of a false positive, but filtering on density has no knee: min-density
+    0.35 costs 1.0pp recall to remove 220s of outside-LLM time, 0.55 costs 2.0pp, and 0.75
+    collapses recall to 60.2%. "Outside the LLM's spans" is not a synonym for "false positive"
+    either — much of it is ads the LLM missed — so shrinking it is not purely a win. Left out.
+
+- **`cut` no longer removes audio on the strength of any span it can find.** It selected every
+  `ad_segments` row regardless of source, so the new discovery tiers would have silently started
+  deleting audio: `dai` spans whose END is only an upper bound (over-cutting into editorial
+  either side of the real insert), and `recur` spans of which roughly 1 in 10 is not an ad.
+  Cutting is now limited to `CUT_SOURCES` — `chapter`, `llm`, `repeat`, `fpmatch`.
+  - The line is NOT evidence-vs-inference: `repeat` and `fpmatch` are inference and are exactly
+    what the cheap tiers exist to cut. It is whether a tier pins the span's EDGES — those four
+    ground their boundaries in publisher markers, transcript segment timestamps, or audio
+    alignment. `dai` and `recur` find ads well without saying where they stop, which makes them
+    good seeds and bad scissors.
+  - `cut.pending_episodes` filters by the same list, so an episode carrying only discovery spans
+    isn't treated as pending — that would rewrite the file unchanged and mark it cut, retiring it
+    before any real span arrived.
+  - Override deliberately with `adscrub cut --sources ...`.
 
 - **`download_audio` now caps episode size** (default 1 GiB, override with
   `ADSCRUB_MAX_AUDIO_MB`). A hostile or malformed feed could previously stream
