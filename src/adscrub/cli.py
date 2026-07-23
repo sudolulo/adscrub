@@ -1,14 +1,15 @@
-"""adscrub command line: add-feed, ingest, chapters, transcribe, repeats, detect, cut, serve, stats."""
+"""adscrub command line: add-feed, ingest, chapters, transcribe, repeats, fingerprint, detect, cut, serve, stats."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import httpx
 
-from . import __version__, chapters, cut, db, detect, feed, ingest, repeats, transcribe
+from . import __version__, chapters, cut, db, detect, feed, fingerprint, ingest, repeats, transcribe
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
@@ -113,6 +114,43 @@ def cmd_repeats(args: argparse.Namespace) -> int:
     hit = sum(1 for r in results if r.found)
     print(f"matched {found} repeated ad span(s) across {hit} of {len(results)} episode(s) "
           f"({errors} failed) — {len(library):,} known ad shingles, no model called")
+    return 0
+
+
+def cmd_fingerprint(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    if not fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+    data_dir = Path(args.data_dir)
+
+    def progress(n: int, total: int) -> None:
+        if n == 1 or n % 25 == 0 or n == total:
+            print(f"  ..    building library: fingerprinted {n}/{total} confirmed ad read(s)",
+                  file=sys.stderr)
+
+    library = fingerprint.build_library(conn, data_dir, on_progress=progress)
+    if not library:
+        print("no confirmed ad recordings yet — chapters/transcribe+LLM (or dai) has to go first",
+              file=sys.stderr)
+        return 1
+
+    def report(r: fingerprint.FingerprintResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} fingerprinted ad span(s)")
+
+    with make_client() as client:
+        results = fingerprint.apply_fingerprints(
+            conn, client, data_dir=data_dir, limit=args.limit, on_result=report
+        )
+    errors = sum(1 for r in results if r.error)
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"matched {found} ad span(s) across {hit} of {len(results)} episode(s) "
+          f"({errors} failed) — {library.n_episodes} source episode(s) in the library, "
+          f"no transcript or model")
     return 0
 
 
@@ -249,6 +287,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int,
                    help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
     p.set_defaults(func=cmd_repeats)
+
+    p = sub.add_parser(
+        "fingerprint",
+        help="match episode AUDIO against confirmed ad recordings (free, no transcript or model)")
+    p.add_argument("--limit", type=int,
+                   help="scan only the first N episodes by id — ad-hoc/testing only. Like "
+                        "repeats there is no pending-queue (re-scanning is free, the library "
+                        "grows), so the pipeline runs this UNBOUNDED.")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_fingerprint)
 
     p = sub.add_parser("detect", help="classify ad spans from transcripts with a Claude model")
     p.add_argument("--limit", type=int, help="max episodes to process this run")

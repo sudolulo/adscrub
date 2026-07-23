@@ -19,10 +19,12 @@ on, and a feed-level proxy works with any podcast app, not just one.
    visible to the process, CPU int8 otherwise — auto-detected, no config needed).
 4. **Detect** (done) — classify ad spans from the transcript via a Claude model
    (host-read ad patterns: "brought to you by", promo codes, URL drops, tone
-   shift) — this matters because modern ads are often host-read and unique per
-   episode/listener, so a fingerprint/crowdsourced-timestamp database (SponsorBlock
-   style) can't catch them. The model points at transcript segment indices, not
-   raw timestamps, so stored spans are always grounded in Whisper's own output.
+   shift). A *global, crowdsourced* fingerprint/timestamp database (SponsorBlock
+   style) can't catch these — they're often host-read and dynamically inserted, so
+   there's nothing stable for strangers to share. Matching our OWN corpus against
+   itself is a different, cheaper thing (see the recognition tiers below). The model
+   points at transcript segment indices, not raw timestamps, so stored spans are
+   always grounded in Whisper's own output.
 5. **Cut** (done) — `ffmpeg` extracts the surviving (non-ad) spans and concatenates
    them with no re-encoding (`-c copy` — no quality loss). Ad spans from any source
    (chapter, LLM) are merged before cutting, so overlapping/duplicate detections
@@ -31,6 +33,23 @@ on, and a feed-level proxy works with any podcast app, not just one.
    point at locally-served audio (`/audio/<id>.<ext>`), everything else still points
    at its original URL unchanged. This is the only thing the podcast player ever
    sees — point AntennaPod at `/feed/<id>` instead of the original feed.
+
+### Cheap recognition tiers: `repeats` and `fingerprint`
+
+Two tiers recognise ads the corpus has already confirmed, so the model never re-reads a
+campaign it has read before — "detection is layered, cheapest-first" made real. Both match
+our OWN corpus against itself (not a crowdsourced database): we fetch each episode once from
+an ad server rotating a small pool of campaigns, so the same reads recur across episodes.
+
+- **`repeats`** matches the transcript against ad *reads* (text) confirmed elsewhere — in
+  front of the model, but still after transcription.
+- **`fingerprint`** matches the *audio* against ad *recordings* confirmed elsewhere — before
+  transcription, so a known campaign costs no ASR and no model at all.
+
+Both are recognition, not discovery: the first airing of a campaign still needs
+chapters/transcribe+LLM (or `dai`) to confirm it and seed the library. Measured recall is
+~90% of confirmed-ad duration on a single-show corpus, and it generalises across shows for
+shared DAI campaigns (see CHANGELOG). `fingerprint` needs `fpcalc` (Chromaprint).
 
 See [docs/PLAN.md](docs/PLAN.md) for the full milestone breakdown.
 
@@ -41,7 +60,9 @@ uv sync
 uv run adscrub add-feed https://feeds.example.com/show   # register a feed to proxy
 uv run adscrub ingest                                     # fetch it, upsert episodes
 uv run adscrub chapters                                   # scan chapter markers for ad spans
+uv run adscrub fingerprint                                # match audio vs known ad recordings (no transcript/model)
 uv run adscrub transcribe                                 # Whisper the rest
+uv run adscrub repeats                                    # match transcripts vs known ad reads (no model)
 uv run adscrub detect                                     # LLM ad-span classification
 uv run adscrub cut                                        # ffmpeg out the ad spans
 uv run adscrub serve --base-url http://this-host:8711     # serve the cleaned feed(s)
@@ -61,6 +82,10 @@ GPU deploy path (`uv sync --extra gpu` pulls in the cuBLAS/cuDNN libs faster-whi
 needs for CUDA).
 
 The database defaults to `./adscrub.db`; override with `--db` or `$ADSCRUB_DB`.
+
+`chapters`/`transcribe`/`cut` need `ffmpeg`/`ffprobe` on `PATH`; `fingerprint`
+additionally needs `fpcalc` (Chromaprint — `libchromaprint-tools` on Debian/Ubuntu,
+`chromaprint` in Homebrew). All are system packages, not Python dependencies.
 
 ## Development
 

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`fingerprint` tier — acoustic ad recognition** (`fingerprint.py`, `adscrub
+  fingerprint`). Matches an episode's AUDIO against Chromaprint fingerprints of ad
+  recordings already confirmed elsewhere in the corpus (`llm`/`chapter` spans), so a
+  campaign confirmed once is cut with no transcript and no model — the cost lever
+  `repeats` structurally can't pull, since it needs the Whisper transcript first. Runs
+  before transcription: a sibling audio stage, not a transcript `AdSpanDetector`.
+  Whole-episode and ad-region fingerprints are both cached (`episode_fingerprints`,
+  `ad_fingerprints`), so re-scanning a grown library re-runs only cheap set-lookups, never
+  the decode. `fpmatch` spans are inference and never seed the library
+  (`GROUND_TRUTH_SOURCES` unchanged) — same discipline as `repeats`. Requires `fpcalc`
+  (Chromaprint); a clear error, not a crash, if it's absent.
+  - Measured leave-one-out on the live corpus (Casefile, 82 eps, 286 confirmed ads):
+    **89.1% of confirmed ad DURATION recovered from audio alone**, 0 episodes fully
+    missed (pilot slice-recovery 90.5% / 98.3% by duration, 0/82 non-ad control
+    false-match). The ~30% of detected time outside the LLM's own spans is mostly ads the
+    LLM silently missed, the same under-detection `repeats` was built to catch.
+  - Cross-show (The Casual Criminalist, 40 eps, **no ad labels**): the mechanism
+    generalises — 40/40 episodes carry recurring ad audio, verified as real ads
+    (Pepsi/Nordstrom/Netflix/Flexcar), ~75%+ of flagged time explicitly ad-marked. 13/40
+    episodes share the Flexcar DAI campaign with Casefile, caught cross-show from
+    Casefile's library with zero CC labels — a library from one show recognises another
+    show's ads when they share a programmatic campaign.
+  - Not yet wired into `cut`/hark or run as an unsupervised auto-cut: residual false
+    positives are short (~10s) fragments plus the occasional shared music bed, so a
+    min-region guard and a review pass are the precision follow-ups.
+
 ### Fixed
 
 - **`download_audio` now caps episode size** (default 1 GiB, override with
