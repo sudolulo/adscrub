@@ -50,14 +50,44 @@ class DetectedAdSpan:
 
 
 class AdSpanDetector(Protocol):
-    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]: ...
+    # `skip` names segments already covered by a cheaper tier. Honouring it is optional: a free
+    # tier (repeats) should ignore it and re-examine everything, because re-examining costs
+    # nothing and might find more. Only a tier billed per token has a reason to look away.
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[DetectedAdSpan]: ...
 
 
 class NullDetector:
     """Placeholder that detects nothing (used by tests and dry paths)."""
 
-    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[DetectedAdSpan]:
         return []
+
+
+def covered_segment_indices(
+    conn: sqlite3.Connection, episode_id: int, transcript: list[dict]
+) -> frozenset[int]:
+    """Transcript segments already inside SOME tier's ad span, whatever the source.
+
+    Overlap, not containment — a segment straddling an ad boundary is still ad audio, the same
+    rule repeats.py uses when it maps spans back onto segments.
+    """
+    spans = [
+        (r["start_second"], r["end_second"])
+        for r in conn.execute(
+            "SELECT start_second, end_second FROM ad_segments WHERE episode_id = ?",
+            (episode_id,),
+        )
+    ]
+    if not spans:
+        return frozenset()
+    return frozenset(
+        i for i, seg in enumerate(transcript)
+        if any(seg["end"] > s and seg["start"] < e for s, e in spans)
+    )
 
 
 @dataclass
@@ -81,10 +111,12 @@ class LayeredDetector:
 
     detectors: list[AdSpanDetector]
 
-    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[DetectedAdSpan]:
         spans: list[DetectedAdSpan] = []
         for detector in self.detectors:
-            spans += detector.detect(transcript)
+            spans += detector.detect(transcript, skip)
         return spans
 
 
@@ -143,18 +175,41 @@ def spans_from_segment_indices(
 _CHUNK_CHARS = 20_000
 
 
-def _chunks(transcript: list[dict]) -> list[str]:
-    """Render the whole transcript as one or more calls' worth of numbered segments."""
+def _chunks(transcript: list[dict], skip: frozenset[int] = frozenset()) -> list[str]:
+    """Render the transcript as one or more calls' worth of numbered segments.
+
+    Segments in `skip` are already covered by a cheaper tier, so sending them to the model is
+    paying to rediscover what we know. They are omitted and replaced by an elision marker —
+    the marker matters: without it two segments either side of a removed ad look adjacent, and
+    the model would read a seam that isn't there.
+
+    Indices stay GLOBAL (the omitted ones are simply absent), so every span the model returns
+    still grounds against the full transcript via spans_from_segment_indices.
+    """
     out: list[str] = []
     buf: list[str] = []
     size = 0
+    elided = 0
+
+    def flush_elision() -> None:
+        nonlocal elided, size
+        if elided:
+            buf.append(f"[... {elided} segment(s) already identified as ads, omitted ...]")
+            size += len(buf[-1]) + 1
+            elided = 0
+
     for i, seg in enumerate(transcript):
+        if i in skip:
+            elided += 1
+            continue
         line = f"[{i}] {seg['start']:.1f}-{seg['end']:.1f}: {seg['text']}"
         if buf and size + len(line) + 1 > _CHUNK_CHARS:
             out.append("\n".join(buf))
             buf, size = [], 0
+        flush_elision()
         buf.append(line)
         size += len(line) + 1
+    flush_elision()
     if buf:
         out.append("\n".join(buf))
     return out
@@ -171,11 +226,13 @@ class ClaudeAdDetector:
         self.client = client
         self.model = model
 
-    def detect(self, transcript: list[dict]) -> list[DetectedAdSpan]:
+    def detect(
+        self, transcript: list[dict], skip: frozenset[int] = frozenset()
+    ) -> list[DetectedAdSpan]:
         if not transcript:
             return []
         raw: list[dict] = []
-        for chunk in _chunks(transcript):
+        for chunk in _chunks(transcript, skip):
             response = self.client.messages.parse(
                 model=self.model,
                 max_tokens=2048,
@@ -256,7 +313,10 @@ def detect_episode(conn: sqlite3.Connection, episode: sqlite3.Row, detector: AdS
     """
     with open(episode["transcript_path"], encoding="utf-8") as fh:
         transcript = json.load(fh)
-    spans = detector.detect(transcript)
+    # Whatever the cheap tiers (chapters/fingerprint/repeats/dai) already found is not worth
+    # paying the model to find again — it sees only the remainder. Directly proportional saving:
+    # an episode already 60% covered costs ~40% of the tokens it used to.
+    spans = detector.detect(transcript, covered_segment_indices(conn, episode["id"], transcript))
     _store(conn, episode["id"], spans)
     conn.commit()
     return len(spans)

@@ -504,6 +504,109 @@ class AudioFingerprintDetector:
         return self.match_fingerprint(fp, probe_duration(Path(audio_path)), exclude_episode_id)
 
 
+# Cold start needs a real corpus, and the floor is arithmetic rather than taste: a campaign has
+# to appear in at least 2 episodes to recur at all, while the frequency stop-list drops anything
+# carried by more than STOP_EPISODE_FRACTION of them. With 4 episodes those two rules collide —
+# 2 of 4 is 50%, so the only ad that could be found is deleted for being too common. Discovery
+# is not possible below ceil(2 / STOP_EPISODE_FRACTION) ≈ 7 episodes; 8 gives a little headroom.
+RECUR_MIN_EPISODES = 8
+
+
+@dataclass
+class DiscoverResult:
+    episode_id: int
+    title: str
+    found: int = 0
+    error: str | None = None
+
+
+def discover_recurring(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    limit: int | None = None,
+    on_result: Callable[[DiscoverResult], None] | None = None,
+) -> list[DiscoverResult]:
+    """COLD START: find a feed's ads with no confirmed ads to match against — none at all.
+
+    The seeded tier can only RECOGNISE campaigns something else already confirmed, which is
+    useless on a brand-new feed: the library is empty, so every episode has to go through
+    transcription and the model before anything gets cheap. This closes that gap by matching the
+    feed against ITSELF. Audio that recurs across otherwise-unrelated episodes is, almost by
+    definition, not the episode's content — it is the inserted material.
+
+    The frequency stop-list is the RIGHT tool here, and this is the one place it is used alone.
+    Its usual weakness (a sponsor running in most episodes gets dropped) is exactly the strength
+    needed now: a show's fixed intro, outro and stings recur in ~every episode and must be
+    ignored, while a rotating campaign sits in a minority and survives. There is no editorial
+    veto available yet — deriving one needs confirmed ads, which is what we don't have.
+
+    Measured on The Casual Criminalist (40 episodes, zero labels): recurring audio found in
+    40/40 episodes, ~89% of the flagged time carrying an explicit ad marker, and spot-checks
+    reading as real ads (Pepsi, Nordstrom Rack, Netflix, Taco Bell).
+
+    Spans are stored as `recur` — INFERENCE, not evidence. Deliberately absent from both
+    GROUND_TRUTH_SOURCES and FP_LIBRARY_SOURCES: letting a guess seed the library is the drift
+    repeats.py was bitten by. Note that `cut` acts on every ad_segments row regardless of source,
+    so enabling this on a feed accepts that ~1 flagged region in 10 may not be an ad.
+    """
+    ensure_schema(conn)
+    query = "SELECT id, title, audio_url FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
+    params: tuple = ()
+    if limit:
+        query += " LIMIT ?"
+        params = (limit,)
+    rows = conn.execute(query, params).fetchall()
+    if len(rows) < RECUR_MIN_EPISODES:
+        return []
+
+    fps: dict[int, tuple[list[int], float]] = {}
+    for row in rows:
+        audio = Path(data_dir) / "audio" / f"{row['id']}.mp3"
+        if not audio.exists():
+            continue  # costs coverage, never correctness
+        fp, duration = episode_fingerprint(conn, row["id"], audio)
+        if fp:
+            fps[row["id"]] = (fp, duration)
+    if len(fps) < RECUR_MIN_EPISODES:
+        return []
+
+    index: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    ep_of_value: dict[int, set[int]] = defaultdict(set)
+    for eid, (fp, _) in fps.items():
+        for k, v in enumerate(fp):
+            index[v].append((eid, k))
+            ep_of_value[v].add(eid)
+    stop = {v for v, eps in ep_of_value.items() if len(eps) > STOP_EPISODE_FRACTION * len(fps)}
+    library = Library(index=dict(index), stop=stop,
+                      ad_episode={e: e for e in fps}, n_episodes=len(fps))
+    detector = AudioFingerprintDetector(library)
+
+    results: list[DiscoverResult] = []
+    for row in rows:
+        if row["id"] not in fps:
+            continue
+        result = DiscoverResult(episode_id=row["id"], title=row["title"] or "")
+        fp, duration = fps[row["id"]]
+        try:
+            spans = [
+                DetectedAdSpan(s.start_second, s.end_second,
+                               "recurs across other episodes of this feed", source="recur")
+                for s in detector.match_fingerprint(fp, duration, exclude_episode_id=row["id"])
+            ]
+            conn.execute("DELETE FROM ad_segments WHERE episode_id = ? AND source = 'recur'",
+                         (row["id"],))
+            insert_spans(conn, row["id"], spans)
+            conn.commit()
+            result.found = len(spans)
+        except Exception as exc:  # noqa: BLE001 — one bad episode must not stop the sweep
+            conn.rollback()
+            result.error = str(exc)
+        results.append(result)
+        if on_result:
+            on_result(result)
+    return results
+
+
 @dataclass
 class FingerprintResult:
     episode_id: int

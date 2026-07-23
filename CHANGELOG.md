@@ -46,6 +46,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     positives are short (~10s) fragments plus the occasional shared music bed, so a
     min-region guard and a review pass are the precision follow-ups.
 
+- **The model is now only sent transcript it hasn't already had explained to it.**
+  `detect_episode` computes `covered_segment_indices` (segments inside ANY tier's ad span) and
+  `_chunks` omits them, so an episode already 60% covered costs ~40% of the tokens it used to.
+  Omissions are replaced by an elision marker — without it the segments either side of a removed
+  ad read as adjacent and the model sees a seam that isn't there. Indices stay GLOBAL, so spans
+  still ground against the full transcript. `AdSpanDetector.detect` gained an optional `skip`
+  argument; free tiers (repeats) deliberately ignore it, since re-examining costs nothing and can
+  widen a span a cheaper tier only partly caught.
+
+- **Cold start: `fingerprint.discover_recurring` / `adscrub discover`.** The seeded tier can only
+  recognise campaigns something else already confirmed, which is useless on a new feed. This
+  matches a feed against ITSELF: audio recurring across otherwise-unrelated episodes is the
+  inserted material, not the content. Needs no library, no transcript and no model.
+  - The frequency stop-list is used ALONE here and that is correct — its usual weakness (a
+    sponsor in most episodes gets dropped) is the strength needed: the show's fixed intro/outro
+    recurs everywhere and must be ignored, a rotating campaign is a minority and survives. No
+    editorial veto is available, since deriving one needs the confirmed ads we don't have.
+  - `RECUR_MIN_EPISODES = 8`, and the floor is arithmetic: a campaign needs 2+ episodes to recur
+    but must stay under the ~30% frequency threshold, so discovery is impossible below ~7.
+  - Verified on The Casual Criminalist (40 episodes, zero labels): recurring audio in 40/40
+    episodes, 174 regions, ~211s/episode, reading as real ads (Pepsi, Mint Mobile, Mark Spain,
+    Taco Bell). It recovered that feed's DAI inserts and NOT its host-read Shopify spot — which
+    is the expected split, and matches the probe below.
+  - Spans are `recur`: INFERENCE, absent from both `GROUND_TRUTH_SOURCES` and
+    `FP_LIBRARY_SOURCES`. `cut` acts on every row regardless of source, so enabling this accepts
+    that roughly 1 flagged region in 10 may not be an ad.
+
+- **Measured: being host-read is not what defeats fingerprinting — being re-*read* is.** A
+  host-read spot recorded once and re-rolled across a flight is one recording and matches like
+  any other insert. The Casual Criminalist re-records its Shopify read per episode: it appears in
+  33 of 40 episodes and matched 0/39, while a DAI insert from the same episode matched 2/39 and a
+  control editorial region matched 0/39. So the gap is per-show and worth measuring per feed
+  rather than assuming; `repeats` covers it, since the WORDS recur even when the recording doesn't.
+
 - **DAI probe results are now persisted** (`dai.dai_episode`, `adscrub dai`). The probe already
   proved which bytes were server-inserted, and then threw the finding away — nothing was ever
   written to `ad_segments`. Divergences are now stored as `dai` spans (byte offsets converted

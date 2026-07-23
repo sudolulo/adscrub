@@ -143,6 +143,32 @@ def cmd_dai(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_discover(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    if not fingerprint.fpcalc_available():
+        print("fpcalc (Chromaprint / libchromaprint-tools) is not installed", file=sys.stderr)
+        return 1
+
+    def report(r: fingerprint.DiscoverResult) -> None:
+        if r.error:
+            print(f"  FAIL  {r.title}: {r.error}", file=sys.stderr)
+        elif r.found:
+            print(f"  ok    {r.title}: {r.found} recurring region(s)")
+
+    results = fingerprint.discover_recurring(
+        conn, Path(args.data_dir), limit=args.limit, on_result=report)
+    if not results:
+        print(f"need at least {fingerprint.RECUR_MIN_EPISODES} downloaded episodes to tell "
+              "recurring audio from episode content", file=sys.stderr)
+        return 1
+    found = sum(r.found for r in results)
+    hit = sum(1 for r in results if r.found)
+    print(f"found {found} recurring region(s) across {hit} of {len(results)} episode(s) — "
+          "no library, no transcript, no model. These are INFERENCE (source='recur'): they are "
+          "cut like any other span, and roughly 1 in 10 may not be an ad.")
+    return 0
+
+
 def cmd_fingerprint(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
     if not fingerprint.fpcalc_available():
@@ -320,6 +346,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
                    help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
     p.set_defaults(func=cmd_dai)
+
+    p = sub.add_parser(
+        "discover",
+        help="cold start: find ads on a feed with NO confirmed ads, by matching it against itself")
+    p.add_argument("--limit", type=int, help="max episodes to consider")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_discover)
 
     p = sub.add_parser(
         "fingerprint",

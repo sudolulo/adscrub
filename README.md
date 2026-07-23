@@ -47,7 +47,10 @@ an ad server rotating a small pool of campaigns, so the same reads recur across 
   transcription, so a known campaign costs no ASR and no model at all.
 
 Both are recognition, not discovery: the first airing of a campaign still needs
-chapters/transcribe+LLM (or `dai`) to confirm it and seed the library. Measured recall is
+chapters/transcribe+LLM (or `dai`) to confirm it and seed the library. On a brand-new feed
+with nothing confirmed at all, `discover` bootstraps by matching the feed against itself.
+Whatever any tier covers is then omitted from the model's prompt, so the LLM is only billed
+for what is genuinely new. Measured recall is
 ~90% of confirmed-ad duration on a single-show corpus, and it generalises across shows for
 shared DAI campaigns (see CHANGELOG). `fingerprint` needs `fpcalc` (Chromaprint).
 
@@ -60,6 +63,8 @@ uv sync
 uv run adscrub add-feed https://feeds.example.com/show   # register a feed to proxy
 uv run adscrub ingest                                     # fetch it, upsert episodes
 uv run adscrub chapters                                   # scan chapter markers for ad spans
+uv run adscrub dai                                        # probe for server-inserted ads (no transcript/model)
+uv run adscrub discover                                   # cold start: find ads by self-recurrence (new feeds)
 uv run adscrub fingerprint                                # match audio vs known ad recordings (no transcript/model)
 uv run adscrub transcribe                                 # Whisper the rest
 uv run adscrub repeats                                    # match transcripts vs known ad reads (no model)

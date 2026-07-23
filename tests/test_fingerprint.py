@@ -12,7 +12,7 @@ from collections import defaultdict
 
 import pytest
 
-from adscrub import db, fingerprint
+from adscrub import db, fingerprint, repeats
 
 # A synthetic "ad recording": 60 distinct frame values (>= MATCH_FRAMES so one aligned run
 # clears the threshold). Padding values (1, 2) never appear in any library.
@@ -309,3 +309,73 @@ def test_audio_appearing_in_editorial_is_stop_listed(conn, data_dir, monkeypatch
     assert lib.stop == set(AD)  # all values ubiquitous -> all stop-listed
     # floor passed explicitly so the stop-list is what makes this empty, not the emit floor
     assert fingerprint.match_regions(PAD + AD + PAD, lib, min_region_frames=len(AD)) == []
+
+
+# --- cold start: discover_recurring (no confirmed ads anywhere) ---
+
+
+@pytest.fixture
+def coldstart(conn, data_dir, monkeypatch):
+    """A feed with NO confirmed ads: 8 episodes, an ad in 2 of them, plus a shared intro.
+
+    8 rather than 4 because a campaign in 2 of 4 episodes is 50% of the corpus and the frequency
+    stop-list would delete it — see RECUR_MIN_EPISODES. In 2 of 8 it is a 25% minority and lives."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    eids = [_seed(conn, data_dir, f"cold-{i}") for i in range(8)]
+    INTRO = list(range(7000, 7100))          # in EVERY episode -> must be stop-listed
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 100.0)
+    monkeypatch.setattr(fingerprint, "MIN_REGION_FRAMES", fingerprint.MATCH_FRAMES)
+
+    def fake_fpcalc(path, length=fingerprint.FP_LENGTH):
+        eid = int(str(path).rsplit("/", 1)[-1].split(".")[0])
+        # every episode: intro, unique body, then the shared ad in only 2 of the 4
+        body = list(range(900_000 + eid * 1000, 900_000 + eid * 1000 + 100))
+        return INTRO + body + (AD if eid in (eids[0], eids[1]) else [])
+
+    monkeypatch.setattr(fingerprint, "_fpcalc", fake_fpcalc)
+    return conn, data_dir, eids, INTRO
+
+
+def test_discover_finds_the_shared_ad_without_any_labels(coldstart):
+    conn, data_dir, eids, _ = coldstart
+    results = fingerprint.discover_recurring(conn, data_dir)
+    found = {r.episode_id: r.found for r in results}
+    assert found[eids[0]] == 1 and found[eids[1]] == 1   # the two carrying the shared ad
+    assert all(found[e] == 0 for e in eids[2:])          # nothing recurring in the rest
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM ad_segments WHERE source='recur'").fetchone()["c"] == 2
+
+
+def test_discover_ignores_the_shows_own_intro(coldstart):
+    """The intro recurs in every episode — that's the frequency stop-list's whole job here."""
+    conn, data_dir, eids, INTRO = coldstart
+    fingerprint.discover_recurring(conn, data_dir)
+    row = conn.execute("SELECT start_second, end_second FROM ad_segments "
+                       "WHERE episode_id=? AND source='recur'", (eids[0],)).fetchone()
+    per_frame = 100.0 / (100 + 100 + len(AD))
+    assert row["start_second"] > len(INTRO) * per_frame  # match sits past the intro, not on it
+
+
+def test_discover_output_never_seeds_a_library(coldstart):
+    """`recur` is inference. If it seeded the library the detector would bootstrap off guesses."""
+    conn, data_dir, _, _ = coldstart
+    fingerprint.discover_recurring(conn, data_dir)
+    assert "recur" not in fingerprint.FP_LIBRARY_SOURCES
+    assert "recur" not in repeats.GROUND_TRUTH_SOURCES
+    assert fingerprint.build_library(conn, data_dir).n_episodes == 0
+
+
+def test_discover_needs_enough_episodes(conn, data_dir, monkeypatch):
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    _seed(conn, data_dir, "only-one")
+    assert fingerprint.discover_recurring(conn, data_dir) == []
+
+
+def test_discover_is_idempotent(coldstart):
+    conn, data_dir, eids, _ = coldstart
+    for _ in range(3):
+        fingerprint.discover_recurring(conn, data_dir)
+    assert conn.execute("SELECT COUNT(*) c FROM ad_segments WHERE episode_id=? AND source='recur'",
+                        (eids[0],)).fetchone()["c"] == 1
