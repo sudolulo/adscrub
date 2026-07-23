@@ -574,6 +574,7 @@ def test_cached_fingerprint_needs_no_audio(conn, data_dir, monkeypatch):
     first would quietly require keeping the thing the index exists to replace."""
     conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
     eid = _seed(conn, data_dir, "indexed")
+    fingerprint.ensure_schema(conn)          # cache tables are created lazily
     conn.execute("INSERT INTO episode_fingerprints (episode_id, fingerprint, duration) "
                  "VALUES (?, ?, ?)", (eid, ",".join(str(v) for v in AD), 42.0))
     conn.commit()
