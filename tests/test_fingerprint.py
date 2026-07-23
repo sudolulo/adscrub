@@ -493,3 +493,76 @@ def test_no_campaigns_below_the_episode_floor(conn, data_dir, monkeypatch):
     _seed(conn, data_dir, "lonely")
     assert fingerprint.find_campaigns(conn, data_dir) == []
     assert fingerprint.select_seed_episodes(conn, data_dir) == []
+
+
+# --- streaming: fingerprint without storing the audio ---
+
+
+class _Stream:
+    """Minimal stand-in for an httpx client streaming bytes."""
+    def __init__(self, payload, chunk=8): self.payload, self.chunk, self.read = payload, chunk, 0
+    def stream(self, method, url):
+        outer = self
+        class Ctx:
+            def __enter__(self):
+                class R:
+                    def raise_for_status(self): pass
+                    def iter_bytes(self, n=None):
+                        for i in range(0, len(outer.payload), outer.chunk):
+                            outer.read += len(outer.payload[i:i + outer.chunk])
+                            yield outer.payload[i:i + outer.chunk]
+                return R()
+            def __exit__(self, *a): return False
+        return Ctx()
+
+
+def test_streaming_stops_at_the_byte_cap(monkeypatch):
+    """A hostile or malformed feed must not stream unboundedly even when nothing is kept."""
+    seen = {}
+    class P:
+        def __init__(self, *a, **k):
+            self.stdin, self.stdout = _Sink(seen), _Out(b"FINGERPRINT=1,2,3\n")
+        def wait(self): pass
+    monkeypatch.setattr(fingerprint.subprocess, "Popen", lambda *a, **k: P())
+    src = _Stream(b"x" * 10_000, chunk=100)
+    fingerprint.stream_fingerprint(src, "http://feed/ep.mp3", max_bytes=500)
+    assert src.read <= 700, f"kept reading past the cap: {src.read}"
+
+
+class _Sink:
+    def __init__(self, seen): self.seen = seen; self.buf = bytearray()
+    def write(self, b): self.buf += b
+    def close(self): self.seen["written"] = len(self.buf)
+
+
+class _Out:
+    def __init__(self, data): self.data = data
+    def read(self): return self.data
+    def close(self): pass
+
+
+def test_streaming_parses_the_fingerprint(monkeypatch):
+    class P:
+        def __init__(self, *a, **k):
+            self.stdin, self.stdout = _Sink({}), _Out(b"DURATION=0\nFINGERPRINT=7,8,9\n")
+        def wait(self): pass
+    monkeypatch.setattr(fingerprint.subprocess, "Popen", lambda *a, **k: P())
+    assert fingerprint.stream_fingerprint(_Stream(b"audio"), "http://x") == [7, 8, 9]
+
+
+def test_stream_episode_fingerprint_caches_and_derives_duration(conn, data_dir, monkeypatch):
+    """Duration comes from the frame count because a piped fpcalc reports DURATION=0 — it
+    cannot seek. Measured error on real episodes is ~0.02%."""
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
+    eid = _seed(conn, data_dir, "streamed")
+    monkeypatch.setattr(fingerprint, "stream_fingerprint", lambda c, u, **k: list(range(100)))
+    fp, dur = fingerprint.stream_episode_fingerprint(conn, eid, "http://f/a.mp3", client=None)
+    assert len(fp) == 100
+    assert dur == pytest.approx(100 * fingerprint.NOMINAL_SECONDS_PER_FRAME)
+    assert conn.execute("SELECT COUNT(*) c FROM episode_fingerprints").fetchone()["c"] == 1
+
+    def boom(*a, **k):
+        raise AssertionError("re-streamed an episode that was already fingerprinted")
+    monkeypatch.setattr(fingerprint, "stream_fingerprint", boom)
+    again, _ = fingerprint.stream_episode_fingerprint(conn, eid, "http://f/a.mp3", client=None)
+    assert again == fp

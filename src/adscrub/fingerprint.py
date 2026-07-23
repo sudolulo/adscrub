@@ -60,7 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .audio import DEFAULT_DATA_DIR, download_audio, probe_duration
+from .audio import DEFAULT_DATA_DIR, MAX_AUDIO_BYTES, download_audio, probe_duration
 from .db import utcnow
 from .detect import DetectedAdSpan, insert_spans
 from .repeats import GROUND_TRUTH_SOURCES
@@ -148,6 +148,58 @@ def _fpcalc(path: str | Path, length: int = FP_LENGTH) -> list[int]:
     return []
 
 
+# Chromaprint's frame rate, measured over 122 real episodes: median 0.123882 s/frame with a
+# 0.1% spread. Used only when a fingerprint was taken from a stream, where fpcalc reports
+# DURATION=0 because it cannot seek. Good enough to decide WHETHER audio matches (a 0.1% error
+# does not move a diagonal); not good enough to decide WHERE to cut — 0.1% is ~4s on a two-hour
+# episode. Cutting needs the real file anyway, and ffprobe gives an exact duration there.
+NOMINAL_SECONDS_PER_FRAME = 0.123882
+
+
+def stream_fingerprint(client, audio_url: str, max_bytes: int = MAX_AUDIO_BYTES) -> list[int]:
+    """Fingerprint an episode straight off the network. Nothing is written to disk.
+
+    A fingerprint is ~184x smaller than the audio it describes (measured: 6.3 GB of episodes
+    -> 34 MB of fingerprints), so an index over a whole corpus is cheap while storing the
+    corpus is not — 27,887 episodes is ~2 TB of audio and well under a gigabyte of fingerprints.
+    fpcalc accepts the stream on stdin and produces a byte-identical fingerprint to the
+    file-based path; the only thing it loses is DURATION, which it cannot compute without
+    seeking (see NOMINAL_SECONDS_PER_FRAME).
+
+    The byte cap is the same guard download_audio applies: a hostile or malformed feed must not
+    be able to stream unboundedly, even when nothing is being kept.
+    """
+    proc = subprocess.Popen(
+        ["fpcalc", "-raw", "-length", str(FP_LENGTH), "-"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    written = 0
+    try:
+        with client.stream("GET", audio_url) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes():
+                written += len(chunk)
+                if written > max_bytes:
+                    break
+                proc.stdin.write(chunk)
+    except BrokenPipeError:
+        pass  # fpcalc stops reading once -length is satisfied; that is a complete fingerprint
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    # read stdout directly rather than communicate(): stdin is already closed above, and
+    # communicate() would try to flush it and raise ValueError on the closed handle
+    out = proc.stdout.read()
+    proc.stdout.close()
+    proc.wait()
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("FINGERPRINT="):
+            return _parse_fingerprint(line[len("FINGERPRINT="):])
+    return []
+
+
 def _fingerprint_region(audio_path: str | Path, start: float, end: float) -> list[int]:
     """Fingerprint just [start, end] of an audio file (used to build the library)."""
     fd, wav = tempfile.mkstemp(suffix=".wav")
@@ -161,6 +213,35 @@ def _fingerprint_region(audio_path: str | Path, start: float, end: float) -> lis
         return _fpcalc(wav)
     finally:
         os.unlink(wav)
+
+
+def stream_episode_fingerprint(
+    conn: sqlite3.Connection, episode_id: int, audio_url: str, client
+) -> tuple[list[int], float]:
+    """Cache an episode's fingerprint without ever storing its audio.
+
+    The duration is derived from the frame count, so it carries NOMINAL_SECONDS_PER_FRAME's
+    ~0.1% error. That is fine for the index this feeds — matching and campaign discovery ask
+    whether audio recurs, not exactly where. An episode that is actually going to be cut gets
+    its audio downloaded by the cut stage, and takes its exact duration from ffprobe then.
+    """
+    ensure_schema(conn)
+    row = conn.execute(
+        "SELECT fingerprint, duration FROM episode_fingerprints WHERE episode_id = ?",
+        (episode_id,),
+    ).fetchone()
+    if row:
+        return _parse_fingerprint(row[0]), row[1]
+    fp = stream_fingerprint(client, audio_url)
+    duration = len(fp) * NOMINAL_SECONDS_PER_FRAME
+    if fp:
+        conn.execute(
+            "INSERT OR REPLACE INTO episode_fingerprints (episode_id, fingerprint, duration) "
+            "VALUES (?, ?, ?)",
+            (episode_id, ",".join(str(v) for v in fp), duration),
+        )
+        conn.commit()
+    return fp, duration
 
 
 def episode_fingerprint(

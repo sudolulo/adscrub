@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-23
+
+### Added
+
+- **`stream_fingerprint` / `stream_episode_fingerprint` — index an episode without storing it.**
+  fpcalc accepts the audio on stdin and produces a **byte-identical** fingerprint to the
+  file-based path, so an episode can be fingerprinted straight off the network and thrown away.
+  Measured: a fingerprint is **~184x smaller** than the audio it describes (6.3 GB of episodes
+  -> 34 MB of fingerprints), which is the difference between a ~2 TB corpus and one that fits
+  in well under a gigabyte.
+  - **What a stream loses is DURATION** — fpcalc cannot seek, so it reports 0. Duration is
+    derived from the frame count via `NOMINAL_SECONDS_PER_FRAME` (0.123882, the median over 122
+    real episodes, 0.1% spread). Measured error on real episodes: **~0.02%** (1.1s on a 6,393s
+    episode). Fine for the index this feeds — matching and campaign discovery ask *whether*
+    audio recurs, not exactly where. Cutting still uses the real file and ffprobe, because it
+    needs the audio anyway and 0.1% is ~4s on a two-hour episode.
+  - Feed-declared `duration_seconds` is **not** a usable substitute: on this corpus episode 1
+    declares 5,896s against 6,393s of actual audio. That 8-minute gap is DAI — every listener
+    gets a differently-sized file — so the feed's number describes nobody's copy.
+  - The same byte cap `download_audio` applies is enforced while streaming: a hostile or
+    malformed feed must not stream unboundedly even when nothing is being kept.
+
+
 ## [0.9.0] - 2026-07-23
 
 ### Added
