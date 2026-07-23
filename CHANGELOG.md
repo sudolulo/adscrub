@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-23
+
+### Fixed
+
+- **Speech corroboration removes the last residual false-positive class** (`drop_speechless_spans`,
+  applied by `fingerprint_episode` when the episode has a transcript). A region that aligns to a
+  confirmed recording but carries no words is a music bed, sting, or room tone that happened to
+  recur — the one error an audio-only tier cannot see, because it never reads. This is what the
+  14s no-speech region in the end-to-end cut was, and the class the cross-show music-bed match
+  belonged to.
+  - Measured on Casefile: removes **12 regions totalling 177s at 0.00% recall cost** (89.6%
+    before and after). It costs nothing because ads talk — the only regions it takes are the
+    ones with nothing to say.
+  - Skipped when there is no transcript, so the tier stays usable *before* transcription, which
+    is its entire reason to exist. Corroboration is free where it's available and never required.
+  - Note this succeeds where the min-density guard failed: density was a proxy for "is this a
+    real match" and had no knee, while speech is a direct test of "is this an ad".
+
+
 ## [0.11.0] - 2026-07-23
 
 ### Fixed

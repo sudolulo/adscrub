@@ -594,3 +594,25 @@ def test_cached_fingerprint_is_none_without_cache_or_audio(conn, data_dir):
     eid = _seed(conn, data_dir, "gone")
     (data_dir / "audio" / f"{eid}.mp3").unlink()
     assert fingerprint.cached_fingerprint(conn, eid, data_dir) is None
+
+
+# --- speech corroboration ---
+
+TX = [{"start": 0.0, "end": 10.0, "text": "this episode is brought to you by a sponsor with words"},
+      {"start": 10.0, "end": 20.0, "text": ""}]
+
+
+def test_speechless_regions_are_dropped():
+    """A region that aligns to a confirmed recording but carries no words is a music bed or
+    room tone — the residual false positive an audio-only tier cannot see."""
+    spans = [fingerprint.DetectedAdSpan(0.0, 10.0, "r", "fpmatch"),
+             fingerprint.DetectedAdSpan(10.0, 20.0, "r", "fpmatch")]
+    kept = fingerprint.drop_speechless_spans(spans, TX)
+    assert len(kept) == 1 and kept[0].start_second == 0.0
+
+
+def test_speech_corroboration_is_skipped_without_a_transcript():
+    """The tier must stay usable BEFORE transcription — that is its whole reason to exist."""
+    spans = [fingerprint.DetectedAdSpan(10.0, 20.0, "r", "fpmatch")]
+    assert fingerprint.drop_speechless_spans(spans, []) == spans
+    assert fingerprint.drop_speechless_spans(spans, None) == spans
