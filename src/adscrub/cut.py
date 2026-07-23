@@ -83,19 +83,24 @@ def snap_spans_to_silence(
 ) -> list[tuple[float, float]]:
     """Pull each ad edge INWARD onto silence, so a cut never runs into speech.
 
-    Why this exists, from a real cut: a fingerprint match ends where the ad RECORDING stops
-    being recognisable, not where the break ends. On Casefile episode 1 that left the edge 2.3s
-    inside the resumed narration, so the cut ate the opening of "It was 405 on the morning of
-    Thursday, June 19, 2014" — invisible to every detection metric, obvious to a listener.
+    A cut edge is a guess about where a break ends, and the failure that matters is running into
+    speech. Moving edges inward onto silence bounds that risk: on a real Casefile cut it tightened
+    3 of 5 edges by up to ~0.9s, and by construction it can only ever shrink what gets removed.
 
-    Snapping to the NEAREST silence was tried first and measured worse (2.3s -> 2.88s clipped):
-    the closest silence to that edge was a pause *within* the narration, and "nearest" has no
-    idea which side of the edge is ad and which is content. Direction is the whole fix — starts
-    only move later, ends only move earlier, so a span can shrink and never grow. That biases
-    every error towards leaving a sliver of ad rather than deleting a sentence, which is the
-    right way round: the leftover ad is audible and harmless, the deleted words are gone.
+    Direction is the whole point. Snapping to the NEAREST silence was tried first and measured
+    worse on real audio, because the closest silence to an edge is often a pause *inside* speech
+    and "nearest" has no idea which side of the edge is ad. Starts may only move later and ends
+    only earlier, so every error leaves a sliver of ad rather than deleting a sentence — the right
+    way round, since leftover ad is audible and harmless while deleted words are gone.
 
     An edge with no silence within `window` is left exactly where it was.
+
+    NOT what this fixes, recorded because the first diagnosis was wrong: an edge on that episode
+    sat 2.3s past where Whisper timestamped the resumed narration, which looked like the cut
+    eating a sentence. It wasn't. Those frames match a confirmed ad recording from ANOTHER
+    episode densely (gaps of 1-3 frames), and this episode's narration is unique to it, so it
+    cannot match another episode's audio — the region is the ad's outro bed and Whisper simply
+    started the segment early. Whisper segment starts are not evidence of speech onset.
     """
     if not silences:
         return list(spans)

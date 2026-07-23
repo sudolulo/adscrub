@@ -101,18 +101,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   INERT: `fpcalc_available()` returned False, the command exited with a tidy message, and a
   healthy-looking image silently never matched an ad.
 
-- **Cut edges are pulled inward onto silence (`snap_spans_to_silence`).** Found by cutting a real
-  episode rather than by any metric: a fingerprint match ends where the ad stops being
-  *recognisable*, not where the break ends, which left one edge 2.3s inside the resumed narration
-  and ate the opening of "It was 405 on the morning of Thursday, June 19, 2014".
-  - Snapping to the NEAREST silence was tried first and measured **worse** (2.3s → 2.88s
-    clipped): the closest silence was a pause *within* the narration. Direction is the fix —
-    starts only move later, ends only move earlier, so a span can shrink and never grow, and
-    every error leaves a sliver of ad rather than deleting a sentence.
-  - **Known limit:** it only helps where silence exists. On that same episode it tightened 3 of 5
-    edges but left the 2.31s clip untouched, because the ad→narration transition has no
-    detectable pause. The residual is a detection-edge problem (likely `BRIDGE_FRAMES` extending
-    a run), not a cut problem, and is not solved here.
+- **Cut edges are pulled inward onto silence (`snap_spans_to_silence`).** A cut edge is a guess
+  about where a break ends, and the failure that matters is running into speech. On a real
+  Casefile cut this tightened 3 of 5 edges by up to ~0.9s, and by construction it can only ever
+  shrink what gets removed.
+  - Direction is the point. Snapping to the NEAREST silence was tried first and measured worse:
+    the closest silence to an edge is often a pause *inside* speech. Starts may only move later
+    and ends only earlier, so every error leaves a sliver of ad rather than deleting a sentence.
+  - **Correction to the previous entry for this change, which claimed the cut "ate the opening
+    of 'It was 405 on the morning of Thursday, June 19, 2014'". That was a misdiagnosis.** Those
+    frames match a confirmed ad recording from ANOTHER episode densely (gaps of 1-3 frames), and
+    an episode's narration is unique to it and cannot match another episode's audio — so the
+    region is the ad's outro bed, and Whisper had simply timestamped the segment early. Whisper
+    segment starts are not evidence of speech onset. No sentence was being deleted.
+  - **A match-density guard was measured and rejected.** Sparse, heavily-bridged regions looked
+    like the signature of a false positive, but filtering on density has no knee: min-density
+    0.35 costs 1.0pp recall to remove 220s of outside-LLM time, 0.55 costs 2.0pp, and 0.75
+    collapses recall to 60.2%. "Outside the LLM's spans" is not a synonym for "false positive"
+    either — much of it is ads the LLM missed — so shrinking it is not purely a win. Left out.
 
 - **`cut` no longer removes audio on the strength of any span it can find.** It selected every
   `ad_segments` row regardless of source, so the new discovery tiers would have silently started

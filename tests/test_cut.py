@@ -250,15 +250,17 @@ def test_cut_sources_excludes_the_edge_unsafe_tiers():
 SIL = [(100.0, 101.0), (200.0, 201.5), (400.0, 400.4)]
 
 
-def test_snaps_an_edge_that_lands_inside_speech():
-    """The real defect: a fingerprint edge 2.3s inside resumed narration clipped its first words."""
+def test_snaps_an_edge_inward_onto_silence():
+    """A cut edge is a guess about where a break ends; moving it onto silence bounds the risk of
+    running into speech."""
     assert cut.snap_spans_to_silence([(99.5, 202.0)], SIL) == [(100.0, 201.5)]
 
 
 def test_only_ever_shrinks_a_span():
-    """Snapping to the NEAREST silence was measured worse on real audio (2.3s -> 2.88s clipped):
-    the closest silence was a pause inside the narration. Starts may only move later and ends
-    only earlier, so every error leaves a sliver of ad instead of deleting a sentence."""
+    """Snapping to the NEAREST silence was measured worse on real audio: the closest silence to an
+    edge is often a pause inside speech, and "nearest" cannot tell which side is ad. Starts may
+    only move later and ends only earlier, so every error leaves a sliver of ad instead of
+    deleting a sentence."""
     start, end = cut.snap_spans_to_silence([(100.6, 199.0)], SIL)[0]
     assert start >= 100.6 and end <= 199.0
     # a silence just PAST the end must not be allowed to extend the cut into speech
