@@ -180,7 +180,7 @@ def test_cut_success_path(tmp_path, capsys, monkeypatch):
     conn.commit()
     conn.close()
 
-    def fake_cut_episode(conn, ep, client, data_dir=None):
+    def fake_cut_episode(conn, ep, client, data_dir=None, sources=cut.CUT_SOURCES):
         conn.execute("UPDATE episodes SET cut_path = 'x.mp3' WHERE id = ?", (ep["id"],))
         conn.commit()
         return "x.mp3", 5.0

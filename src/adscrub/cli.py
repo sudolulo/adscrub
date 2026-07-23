@@ -254,9 +254,10 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
 def cmd_cut(args: argparse.Namespace) -> int:
     conn = db.connect(args.db)
-    pending = cut.pending_episodes(conn, args.limit)
+    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    pending = cut.pending_episodes(conn, args.limit, sources)
     if args.dry_run:
-        total_pending = len(cut.pending_episodes(conn))
+        total_pending = len(cut.pending_episodes(conn, sources=sources))
         print(f"pending episodes: {total_pending}"
               + (f" (would process {len(pending)} this run)" if args.limit else ""))
         return 0
@@ -271,9 +272,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
             print(f"  ok    {r.title}: removed {r.ad_seconds:.1f}s of ads")
 
     with make_client() as client:
-        results = cut.cut_pending(conn, client, limit=args.limit, on_result=report)
+        results = cut.cut_pending(conn, client, limit=args.limit, on_result=report,
+                                  sources=sources)
     errors = sum(1 for r in results if r.error)
-    remaining = len(cut.pending_episodes(conn))
+    remaining = len(cut.pending_episodes(conn, sources=sources))
     print(f"cut {len(results) - errors} episode(s) ({errors} failed, {remaining} still pending)")
     return 1 if errors else 0
 
@@ -376,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("cut", help="cut ad spans out of episode audio with ffmpeg")
     p.add_argument("--limit", type=int, help="max episodes to process this run")
+    p.add_argument("--sources", default=",".join(cut.CUT_SOURCES),
+                   help="comma-separated ad_segments sources to actually remove (default: "
+                        + ",".join(cut.CUT_SOURCES) + "). `dai` and `recur` are excluded by "
+                        "default: they find ads well but do not pin the edges, so cutting them "
+                        "eats into editorial. Add them only deliberately.")
     p.add_argument("--dry-run", action="store_true",
                    help="only report how many episodes are pending")
     p.set_defaults(func=cmd_cut)

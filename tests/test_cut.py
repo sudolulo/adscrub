@@ -192,3 +192,54 @@ def test_cut_pending_isolates_per_episode_failures(conn, tmp_path, monkeypatch):
     assert cut.pending_episodes(conn) == [
         conn.execute("SELECT * FROM episodes WHERE guid = 'ep-2'").fetchone()
     ]
+
+
+# --- which sources are allowed to remove audio ---
+
+
+def _ep_with_span(conn, source, start=10.0, end=20.0):
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://f')")
+    conn.execute("INSERT INTO episodes (feed_id, guid, title, audio_url) "
+                 "VALUES (1, ?, ?, 'http://f/a.mp3')", (source, source))
+    eid = conn.execute("SELECT id FROM episodes WHERE guid=?", (source,)).fetchone()["id"]
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (?, ?, ?, ?)", (eid, start, end, source))
+    conn.commit()
+    return eid
+
+
+def test_discovery_only_episodes_are_not_pending(tmp_path):
+    """`recur`/`dai` find ads but don't pin the edges. An episode with only those has nothing
+    safe to remove — treating it as pending would rewrite the file unchanged and mark it done,
+    retiring it from cutting before real spans ever arrive."""
+    conn = db.connect(tmp_path / "t.db")
+    _ep_with_span(conn, "recur")
+    assert cut.pending_episodes(conn) == []
+    assert len(cut.pending_episodes(conn, sources=("recur",))) == 1  # opt in explicitly
+
+
+def test_trusted_sources_are_pending(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    _ep_with_span(conn, "fpmatch")
+    assert len(cut.pending_episodes(conn)) == 1
+
+
+def test_untrusted_spans_are_not_removed_from_audio(tmp_path):
+    """The real risk: a `recur` span sitting next to a trusted one must not widen the cut."""
+    conn = db.connect(tmp_path / "t.db")
+    eid = _ep_with_span(conn, "llm", 10.0, 20.0)
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (?, 30.0, 40.0, 'recur')", (eid,))
+    conn.commit()
+    rows = conn.execute(
+        "SELECT start_second, end_second FROM ad_segments WHERE episode_id=? AND source IN "
+        "(?,?,?,?)", (eid, *cut.CUT_SOURCES)).fetchall()
+    assert [(r["start_second"], r["end_second"]) for r in rows] == [(10.0, 20.0)]
+    # 30-40 survives in the audio because nothing trusted vouches for those edges
+    keep = cut.compute_keep_spans([(r["start_second"], r["end_second"]) for r in rows], 60.0)
+    assert (20.0, 60.0) in keep
+
+
+def test_cut_sources_excludes_the_edge_unsafe_tiers():
+    assert "dai" not in cut.CUT_SOURCES and "recur" not in cut.CUT_SOURCES
+    assert {"chapter", "llm", "repeat", "fpmatch"} == set(cut.CUT_SOURCES)

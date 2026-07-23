@@ -27,6 +27,22 @@ from .audio import DEFAULT_DATA_DIR, download_audio, probe_duration
 from .db import utcnow
 
 
+# Which sources are trusted to REMOVE AUDIO. The test is not "is this span evidence or
+# inference" — `repeat` and `fpmatch` are inference and are exactly what the cheap tiers exist to
+# cut. The test is whether the span's BOUNDARIES are grounded in something precise:
+#   chapter  publisher-provided markers
+#   llm      grounded in the transcript's own segment timestamps
+#   repeat   same, via matched segments
+#   fpmatch  grounded in audio alignment against a confirmed recording
+# Excluded by default, because their edges are not:
+#   dai      byte-derived; its END is only an upper bound (see dai.dai_episode), so cutting it
+#            would eat into editorial either side of the real insert
+#   recur    cold-start self-recurrence; roughly 1 flagged region in 10 is not an ad at all
+# Both stay valuable for SEEDING and DISCOVERY, which is a different job from cutting. Opt in
+# deliberately (`--sources`) if you want them cut anyway.
+CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch")
+
+
 def compute_keep_spans(
     ad_spans: list[tuple[float, float]], duration: float
 ) -> list[tuple[float, float]]:
@@ -86,18 +102,30 @@ class CutResult:
     error: str | None = None
 
 
-def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list[sqlite3.Row]:
-    """Episodes with at least one ad span found, not yet cut."""
-    query = """
+def pending_episodes(
+    conn: sqlite3.Connection,
+    limit: int | None = None,
+    sources: tuple[str, ...] = CUT_SOURCES,
+) -> list[sqlite3.Row]:
+    """Episodes with at least one CUTTABLE ad span, not yet cut.
+
+    Filtered by source for the same reason cut_episode is: an episode whose only spans came from
+    a discovery tier has nothing to remove, and treating it as pending would rewrite the file
+    unchanged and mark it done — retiring it from cutting for good once real spans arrive.
+    """
+    placeholders = ",".join("?" * len(sources))
+    query = f"""
         SELECT * FROM episodes
         WHERE cut_path IS NULL
-          AND EXISTS (SELECT 1 FROM ad_segments WHERE episode_id = episodes.id)
+          AND EXISTS (SELECT 1 FROM ad_segments
+                      WHERE episode_id = episodes.id AND source IN ({placeholders}))
         ORDER BY id
     """
+    params: tuple = tuple(sources)
     if limit:
         query += " LIMIT ?"
-        return conn.execute(query, (limit,)).fetchall()
-    return conn.execute(query).fetchall()
+        params += (limit,)
+    return conn.execute(query, params).fetchall()
 
 
 def cut_episode(
@@ -105,8 +133,12 @@ def cut_episode(
     episode: sqlite3.Row,
     client: httpx.Client,
     data_dir: Path = DEFAULT_DATA_DIR,
+    sources: tuple[str, ...] = CUT_SOURCES,
 ) -> tuple[Path, float]:
     """Download (if needed), cut ad spans out, update the episode row.
+
+    Only spans from `sources` are removed — see CUT_SOURCES for why a tier can be trusted to
+    find an ad without being trusted to say where it stops.
 
     Returns (cut_path, ad_seconds_removed).
     """
@@ -114,11 +146,13 @@ def cut_episode(
         client, episode["audio_url"], data_dir / "audio" / f"{episode['id']}.mp3"
     )
     duration = probe_duration(audio_path)
+    placeholders = ",".join("?" * len(sources))
     ad_spans = [
         (row["start_second"], row["end_second"])
         for row in conn.execute(
-            "SELECT start_second, end_second FROM ad_segments WHERE episode_id = ?",
-            (episode["id"],),
+            f"SELECT start_second, end_second FROM ad_segments "
+            f"WHERE episode_id = ? AND source IN ({placeholders})",
+            (episode["id"], *sources),
         )
     ]
     keep_spans = compute_keep_spans(ad_spans, duration)
@@ -141,12 +175,13 @@ def cut_pending(
     data_dir: Path = DEFAULT_DATA_DIR,
     limit: int | None = None,
     on_result: Callable[[CutResult], None] | None = None,
+    sources: tuple[str, ...] = CUT_SOURCES,
 ) -> list[CutResult]:
     results: list[CutResult] = []
-    for row in pending_episodes(conn, limit):
+    for row in pending_episodes(conn, limit, sources):
         result = CutResult(episode_id=row["id"], title=row["title"] or "")
         try:
-            _path, ad_seconds = cut_episode(conn, row, client, data_dir)
+            _path, ad_seconds = cut_episode(conn, row, client, data_dir, sources)
             result.ad_seconds = ad_seconds
         except Exception as exc:  # noqa: BLE001 — per-episode isolation
             result.error = str(exc)

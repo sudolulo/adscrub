@@ -96,6 +96,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`cut` no longer removes audio on the strength of any span it can find.** It selected every
+  `ad_segments` row regardless of source, so the new discovery tiers would have silently started
+  deleting audio: `dai` spans whose END is only an upper bound (over-cutting into editorial
+  either side of the real insert), and `recur` spans of which roughly 1 in 10 is not an ad.
+  Cutting is now limited to `CUT_SOURCES` — `chapter`, `llm`, `repeat`, `fpmatch`.
+  - The line is NOT evidence-vs-inference: `repeat` and `fpmatch` are inference and are exactly
+    what the cheap tiers exist to cut. It is whether a tier pins the span's EDGES — those four
+    ground their boundaries in publisher markers, transcript segment timestamps, or audio
+    alignment. `dai` and `recur` find ads well without saying where they stop, which makes them
+    good seeds and bad scissors.
+  - `cut.pending_episodes` filters by the same list, so an episode carrying only discovery spans
+    isn't treated as pending — that would rewrite the file unchanged and mark it cut, retiring it
+    before any real span arrived.
+  - Override deliberately with `adscrub cut --sources ...`.
+
 - **`download_audio` now caps episode size** (default 1 GiB, override with
   `ADSCRUB_MAX_AUDIO_MB`). A hostile or malformed feed could previously stream
   an unbounded body and fill the data volume. An oversized declared
