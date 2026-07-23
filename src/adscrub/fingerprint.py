@@ -30,10 +30,17 @@ WHAT IT CANNOT DO
     - Recognise a campaign it has never confirmed. The FIRST airing of any ad is invisible
       here and must be caught by chapters/transcribe+LLM (or dai.py) to seed the library.
       This is a *recognition* tier, never a *discovery* one.
-    - Catch a re-recorded host read. Fingerprints match the same RECORDING; a host reading
-      the same script twice makes two different recordings. Those are repeats.py's job (it
-      matches words) and the model's. Fingerprint recall is therefore a floor on, not a
-      replacement for, text-level recall.
+    - Catch an ad that is RE-READ rather than re-rolled. Fingerprints match the same
+      RECORDING, so being host-read is NOT itself the obstacle: plenty of host-read spots are
+      recorded once and re-rolled across a flight of episodes, and those match like any other
+      insert. What defeats this tier is a show that re-records its sponsor read every episode.
+      Measured on The Casual Criminalist: their host-read Shopify spot appears in 33 of 40
+      episodes and matched 0/39 — while a DAI insert from the same episode matched 2/39 and a
+      control editorial region matched 0/39, so the miss is the re-reading, not the method.
+      Those are repeats.py's job, since the WORDS still recur near-verbatim even when the
+      recording doesn't. Fingerprint recall is therefore a floor on, not a replacement for,
+      text-level recall — and how large that gap is varies per show, so it is worth measuring
+      per feed rather than assuming.
 
 `fpmatch` spans are INFERENCE, not evidence — never let them seed the library
     (`repeats.GROUND_TRUTH_SOURCES` stays `("llm","chapter")`). A fingerprint match is a
@@ -58,16 +65,31 @@ from .db import utcnow
 from .detect import DetectedAdSpan, insert_spans
 from .repeats import GROUND_TRUTH_SOURCES
 
+# The AUDIO library may additionally seed from `dai` spans — a byte-divergence between two
+# independently-targeted fetches is proof of server-inserted content, found with no model and no
+# transcript. Their END is only an upper bound (see dai.dai_episode), so they are deliberately
+# absent from repeats' text GROUND_TRUTH_SOURCES, where a sloppy boundary would teach the matcher
+# editorial wording. Here the slop is harmless: matching needs a long aligned run, and editorial
+# that bleeds into the span is exactly what the editorial stop-list removes.
+FP_LIBRARY_SOURCES = GROUND_TRUTH_SOURCES + ("dai",)
+
 # Chromaprint emits ~one 32-bit sub-fingerprint per 0.1238s of audio (~8.07 fps). We never
 # hardcode that rate for time mapping — it's derived per file from frames/duration — but the
 # match thresholds below are frame counts, so they are implicitly ~8 frames per second.
 MATCH_FRAMES = 40          # >= ~5s of frames aligned on one offset = a real recording match.
                            # Validated: 0/82 non-ad controls reached this in the pilot.
+MIN_REGION_FRAMES = 80     # ~10s: don't EMIT a run shorter than this. The recurrence sweep on
+                           # a second show (Casual Criminalist) found the tier's false positives
+                           # were almost all short (~5-10s) fragments of music/filler; a real ad
+                           # is >=15s, so a 10s emit floor drops the fragments and keeps the ads.
 BRIDGE_FRAMES = 16         # ~2s: an ad read has brief self-similar-to-nothing beats; bridging
                            # keeps one recording as one span instead of shattering it.
-STOP_EPISODE_FRACTION = 0.30  # a fingerprint value present in >30% of source episodes is
-                           # silence / a common music bed, not ad-identifying — drop it, or it
-                           # manufactures diagonals between unrelated audio.
+STOP_EPISODE_FRACTION = 0.30  # FALLBACK ONLY (see build_editorial_stoplist). A value present in
+                           # >30% of source episodes is *probably* silence / a common bed — but
+                           # a dominant sponsor trips this too, so it is only used when no
+                           # editorial audio is available to derive a real stop-list from.
+EDITORIAL_SAMPLE_SECONDS = 180  # how much known-non-ad audio to sample per episode for the
+EDITORIAL_WINDOW = 60           # stop-list, and the max length of one sampled window.
 FP_LENGTH = 100_000        # fpcalc's -length cap (seconds); large enough to cover a whole
                            # episode. Its default is 120s, which would fingerprint only the
                            # pre-roll and miss every mid/post-roll ad.
@@ -83,6 +105,11 @@ CREATE TABLE IF NOT EXISTS episode_fingerprints (
     episode_id   INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
     fingerprint  TEXT NOT NULL,
     duration     REAL NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS editorial_fingerprints (
+    episode_id   INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    fingerprint  TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 """
@@ -166,6 +193,113 @@ def episode_fingerprint(
     return fp, duration
 
 
+def _merge(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not spans:
+        return []
+    out = [list(spans[0])]
+    for s, e in sorted(spans)[1:]:
+        if s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def editorial_windows(
+    ad_spans: list[tuple[float, float]],
+    duration: float,
+    want: float = EDITORIAL_SAMPLE_SECONDS,
+    window: float = EDITORIAL_WINDOW,
+) -> list[tuple[float, float]]:
+    """Sample up to `want` seconds of audio that is NOT inside a confirmed ad.
+
+    Takes at most `window` seconds from each gap between ads, walking gaps in order, so the
+    sample is spread across the episode (a show's intro, outro and body all get represented)
+    rather than being one contiguous lump of a single scene.
+    """
+    merged = _merge(ad_spans)
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for s, e in merged:
+        if s > cursor:
+            gaps.append((cursor, min(s, duration)))
+        cursor = max(cursor, e)
+    if cursor < duration:
+        gaps.append((cursor, duration))
+
+    out: list[tuple[float, float]] = []
+    total = 0.0
+    for s, e in gaps:
+        if total >= want:
+            break
+        length = min(window, e - s, want - total)
+        if length >= 10:  # too short to carry a usable fingerprint
+            out.append((s, s + length))
+            total += length
+    return out
+
+
+def build_editorial_stoplist(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    sources: tuple[str, ...] = FP_LIBRARY_SOURCES,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> set[int]:
+    """Fingerprint values that occur in known NON-ad audio, and are therefore not ad-identifying.
+
+    This replaces the frequency heuristic, which had a measured failure mode: it drops any value
+    present in >30% of source episodes on the theory that only silence and music beds are that
+    common — but a dominant sponsor is too. Measured on The Casual Criminalist, the Flexcar
+    campaign runs in 27 of 40 episodes (67%), so a frequency stop-list would have deleted a real,
+    recurring ad from the library and made it permanently unmatchable.
+
+    Deriving the list from editorial audio instead asks the right question. We know where the ads
+    are, so everything else in those episodes is known non-ad; anything appearing there (silence,
+    the show's own beds and stings, room tone) cannot identify an ad, however common or rare it
+    is. A ubiquitous sponsor survives, because it never appears in editorial.
+    """
+    ensure_schema(conn)
+    placeholders = ",".join("?" * len(sources))
+    rows = conn.execute(
+        f"""
+        SELECT a.episode_id, a.start_second, a.end_second
+        FROM ad_segments a WHERE a.source IN ({placeholders})
+        ORDER BY a.episode_id
+        """,
+        sources,
+    ).fetchall()
+    by_episode: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for r in rows:
+        by_episode[r["episode_id"]].append((r["start_second"], r["end_second"]))
+
+    cached = {
+        r[0]: r[1]
+        for r in conn.execute("SELECT episode_id, fingerprint FROM editorial_fingerprints")
+    }
+    stop: set[int] = set()
+    for n, (eid, spans) in enumerate(sorted(by_episode.items()), 1):
+        if eid in cached:
+            stop.update(_parse_fingerprint(cached[eid]))
+            continue
+        audio = Path(data_dir) / "audio" / f"{eid}.mp3"
+        if not audio.exists():
+            continue  # costs stop-list coverage, never correctness
+        values: list[int] = []
+        for s, e in editorial_windows(spans, probe_duration(audio)):
+            values += _fingerprint_region(audio, s, e)
+        if values:
+            conn.execute(
+                "INSERT OR REPLACE INTO editorial_fingerprints (episode_id, fingerprint) "
+                "VALUES (?, ?)",
+                (eid, ",".join(str(v) for v in values)),
+            )
+            stop.update(values)
+        if on_progress:
+            on_progress(n, len(by_episode))
+    conn.commit()
+    return stop
+
+
 @dataclass
 class Library:
     """An inverted index over confirmed-ad fingerprints. `index` maps a fingerprint value
@@ -185,7 +319,7 @@ def build_library(
     conn: sqlite3.Connection,
     data_dir: Path = DEFAULT_DATA_DIR,
     exclude_episode_id: int | None = None,
-    sources: tuple[str, ...] = GROUND_TRUTH_SOURCES,
+    sources: tuple[str, ...] = FP_LIBRARY_SOURCES,
     refresh: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Library:
@@ -246,7 +380,24 @@ def build_library(
             ep_of_value[v].add(episode_id)
 
     n_eps = len(set(ad_episode.values()))
-    stop = {v for v, eps in ep_of_value.items() if len(eps) > STOP_EPISODE_FRACTION * n_eps} if n_eps else set()
+    # Frequency proposes, editorial vetoes. A value common across episodes is only dropped if it
+    # ALSO turns up in known non-ad audio — which is what proves it's silence or a bed rather
+    # than a sponsor that simply runs in every episode.
+    #
+    # Both halves are load-bearing, and both were measured on the Casefile corpus:
+    #   frequency alone   -> 88.9% recall, but deletes a campaign running in >30% of episodes
+    #                        (Flexcar runs in 27/40 Casual Criminalist episodes)
+    #   editorial alone   -> 76.8% recall. Far too aggressive: 74,075 values stop-listed vs 1,173,
+    #                        because Chromaprint values collide between ad and ordinary speech, so
+    #                        "seen in editorial once" throws away real ad-identifying audio.
+    #   intersection      -> 89.6% recall, 669 values stopped. Strictly better than either: it
+    #                        BEATS frequency alone (fewer real ad values wrongly dropped) and it
+    #                        spares the ubiquitous sponsor, since the stop set can only shrink
+    #                        relative to frequency alone.
+    frequent = {v for v, eps in ep_of_value.items() if len(eps) > STOP_EPISODE_FRACTION * n_eps} \
+        if n_eps else set()
+    editorial = build_editorial_stoplist(conn, data_dir, sources)
+    stop = (frequent & editorial) if editorial else frequent
     return Library(index=dict(index), stop=stop, ad_episode=ad_episode, n_episodes=n_eps)
 
 
@@ -270,6 +421,7 @@ def match_regions(
     exclude_episode_id: int | None = None,
     match_frames: int = MATCH_FRAMES,
     bridge: int = BRIDGE_FRAMES,
+    min_region_frames: int | None = None,
 ) -> list[tuple[int, int]]:
     """Frame-index runs of `query_fp` that align to a confirmed ad recording.
 
@@ -278,9 +430,16 @@ def match_regions(
     match — coincidental value collisions scatter across offsets, they do not pile onto one
     (the 0% control false-match rate is this criterion working). The query frames on every
     surviving diagonal, grouped into runs, are the ad regions.
+
+    `match_frames` is how much aligned audio a diagonal must carry to count as a match;
+    `min_region_frames` (default MIN_REGION_FRAMES) is how long a grouped run must be to be
+    EMITTED. The emit floor is the higher of the two knobs — raising it past match_frames
+    drops the short (~sub-emit-floor) fragments that were the tier's main false positives
+    without weakening the match test itself. A real ad is >=15s, well above the floor.
     """
     if not query_fp or not library:
         return []
+    emit_floor = max(match_frames, min_region_frames if min_region_frames is not None else MIN_REGION_FRAMES)
     diagonals: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i, v in enumerate(query_fp):
         if v in library.stop:
@@ -293,7 +452,7 @@ def match_regions(
     for frames in diagonals.values():
         if len(frames) >= match_frames:
             ad_frames.update(frames)
-    return _group_runs(sorted(ad_frames), bridge, min_len=match_frames)
+    return _group_runs(sorted(ad_frames), bridge, min_len=emit_floor)
 
 
 @dataclass
@@ -308,6 +467,10 @@ class AudioFingerprintDetector:
     library: Library
     match_frames: int = MATCH_FRAMES
     bridge: int = BRIDGE_FRAMES
+    # None = resolve MIN_REGION_FRAMES at call time rather than baking the value into the
+    # generated __init__ at import. Keeps one source of truth for the floor and lets it be
+    # overridden (config, tests) even for detectors this module constructs internally.
+    min_region_frames: int | None = None
 
     def match_fingerprint(
         self, fp: list[int], duration: float, exclude_episode_id: int | None = None
@@ -319,7 +482,8 @@ class AudioFingerprintDetector:
         # Frame -> seconds via this file's own frame density; robust to fpcalc's edge
         # trimming and independent of the ~8.07 nominal fps.
         per_frame = duration / len(fp)
-        runs = match_regions(fp, self.library, exclude_episode_id, self.match_frames, self.bridge)
+        runs = match_regions(fp, self.library, exclude_episode_id, self.match_frames,
+                             self.bridge, self.min_region_frames)
         return [
             DetectedAdSpan(
                 start_second=a * per_frame,

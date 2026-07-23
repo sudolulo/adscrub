@@ -18,6 +18,8 @@ from adscrub import db, fingerprint
 # clears the threshold). Padding values (1, 2) never appear in any library.
 AD = list(range(1000, 1060))
 PAD = [1] * 20
+# Values that occur in known non-ad audio (the show's beds, room tone, host chatter).
+EDITORIAL = list(range(5000, 5100))
 
 
 def _lib(index_pairs, ad_episode, stop=()):
@@ -58,8 +60,20 @@ def test_group_runs_drops_runs_below_min_len():
 
 def test_matches_an_aligned_recording():
     query = PAD + AD + PAD  # the ad sits in the middle, editorial-noise either side
-    runs = fingerprint.match_regions(query, _one_ad_library())
+    runs = fingerprint.match_regions(query, _one_ad_library(), min_region_frames=len(AD))
     assert runs == [(20, 79)]  # exactly the ad frames, padding untouched
+
+
+def test_emit_floor_drops_short_fragments():
+    """The tier's false positives on a second show were almost all short (~5-10s) music/filler
+    fragments. The emit floor drops a run shorter than MIN_REGION_FRAMES even though it is a
+    genuine alignment, which is the point — a real ad is >=15s, well clear of the floor."""
+    query = PAD + AD + PAD  # AD is a 60-frame (~7.4s) run: a real alignment, but short
+    assert fingerprint.match_regions(query, _one_ad_library(), min_region_frames=len(AD)) == [(20, 79)]
+    assert fingerprint.match_regions(query, _one_ad_library(), min_region_frames=len(AD) + 1) == []
+    # and the shipped default is above this fragment's length, so it is dropped by default
+    assert fingerprint.MIN_REGION_FRAMES > len(AD)
+    assert fingerprint.match_regions(query, _one_ad_library()) == []
 
 
 def test_scattered_collisions_do_not_match():
@@ -73,7 +87,11 @@ def test_scattered_collisions_do_not_match():
 def test_an_episode_is_excluded_from_its_own_corpus():
     lib = _one_ad_library(episode_id=10)
     query = PAD + AD + PAD
-    assert fingerprint.match_regions(query, lib, exclude_episode_id=10) == []
+    # floor passed explicitly: without it the default emit floor alone would drop this run and
+    # the assertion would pass whether or not exclusion actually works
+    assert fingerprint.match_regions(query, lib, exclude_episode_id=10,
+                                     min_region_frames=len(AD)) == []
+    assert fingerprint.match_regions(query, lib, min_region_frames=len(AD)) == [(20, 79)]
 
 
 def test_stop_listed_values_cannot_match():
@@ -82,7 +100,8 @@ def test_stop_listed_values_cannot_match():
         stop=set(AD),  # every ad value is stop-listed (as silence/a common bed would be)
         ad_episode={1: 10},
     )
-    assert fingerprint.match_regions(PAD + AD + PAD, lib) == []
+    # floor passed explicitly so the stop-list is what makes this empty, not the emit floor
+    assert fingerprint.match_regions(PAD + AD + PAD, lib, min_region_frames=len(AD)) == []
 
 
 def test_empty_query_or_library_is_no_match():
@@ -97,7 +116,7 @@ def test_two_campaigns_in_one_episode_are_separate_spans():
     index.update({v: [(2, k)] for k, v in enumerate(ad2)})
     lib = _lib(index, {1: 10, 2: 11})
     query = AD + [1] * 200 + ad2  # 200-frame editorial gap, well past BRIDGE_FRAMES
-    runs = fingerprint.match_regions(query, lib)
+    runs = fingerprint.match_regions(query, lib, min_region_frames=len(AD))
     assert len(runs) == 2
     assert runs[0][0] == 0 and runs[1][1] == len(query) - 1
 
@@ -148,6 +167,11 @@ def corpus(conn, data_dir, monkeypatch):
     # rotating pool) and is exercised by test_stop_list_drops_ubiquitous_values below; here
     # we disable it to test the plumbing in isolation.
     monkeypatch.setattr(fingerprint, "STOP_EPISODE_FRACTION", 2.0)
+    # Same isolation reason: the synthetic ad is a short fragment by the shipped emit floor's
+    # standards. The floor is exercised by test_emit_floor_drops_short_fragments; here we want
+    # the plumbing, so resolve it low. This works because the detector resolves the floor at
+    # call time rather than baking it into __init__.
+    monkeypatch.setattr(fingerprint, "MIN_REGION_FRAMES", fingerprint.MATCH_FRAMES)
     return conn, data_dir, a, b
 
 
@@ -241,11 +265,40 @@ def test_missing_audio_costs_recall_not_correctness(conn, data_dir, monkeypatch)
     assert conn.execute("SELECT COUNT(*) c FROM ad_fingerprints").fetchone()["c"] == 0
 
 
-def test_stop_list_drops_ubiquitous_values(conn, data_dir, monkeypatch):
-    """A value present in more than STOP_EPISODE_FRACTION of source episodes is treated as
-    silence/a common bed and dropped. This is why a diverse rotating ad pool works (each ad
-    is in a MINORITY of episodes) and a single-source library cannot match."""
+def test_editorial_windows_sample_around_the_ads():
+    # ads at 0-60 and 600-700 of a 1200s episode -> gaps are 60-600 and 700-1200
+    w = fingerprint.editorial_windows([(0.0, 60.0), (600.0, 700.0)], 1200.0, want=120, window=60)
+    assert w == [(60.0, 120.0), (700.0, 760.0)]          # spread across gaps, not one lump
+    assert all(not (s < 700 and e > 600) for s, e in w)  # never overlaps an ad
+
+
+def test_ubiquitous_sponsor_survives_the_stoplist(conn, data_dir, monkeypatch):
+    """The measured Flexcar case: a campaign running in EVERY source episode must stay matchable.
+
+    The frequency heuristic deleted exactly this (>30% of episodes -> assumed silence/bed). The
+    editorial-derived stop-list keeps it, because the ad never appears in editorial audio."""
     monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    # the confirmed ad starts at 2.0s; the sampled editorial window starts at 90s
+    monkeypatch.setattr(fingerprint, "_fingerprint_region",
+                        lambda p, s, e: AD if s < 50 else EDITORIAL)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 1200.0)
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    for i in range(4):  # the same ad confirmed in 100% of source episodes
+        _seed(conn, data_dir, f"src-{i}", ad_spans=[(2.0, 90.0)])
+    lib = fingerprint.build_library(conn, data_dir)
+
+    # frequency alone would drop AD (it is in 100% of source episodes); the editorial veto
+    # rescues it, because AD never appears in non-ad audio
+    assert lib.stop == set(), "a ubiquitous ad must survive: frequency proposes, editorial vetoes"
+    assert not (set(AD) & lib.stop), "a ubiquitous ad must NOT be stop-listed"
+    assert fingerprint.match_regions(PAD + AD + PAD, lib, min_region_frames=len(AD)) == [(20, 79)]
+
+
+def test_audio_appearing_in_editorial_is_stop_listed(conn, data_dir, monkeypatch):
+    """Degenerate case: if the SAME audio shows up in both the confirmed ad and the editorial
+    sample, it cannot identify an ad and must be dropped — whatever its frequency."""
+    monkeypatch.setattr(fingerprint, "fpcalc_available", lambda: True)
+    monkeypatch.setattr(fingerprint, "probe_duration", lambda p: 1200.0)
     monkeypatch.setattr(fingerprint, "_fingerprint_region", lambda p, s, e: AD)
     conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
     # 4 source episodes ALL carrying the same ad -> every value is in 100% of episodes
@@ -254,4 +307,5 @@ def test_stop_list_drops_ubiquitous_values(conn, data_dir, monkeypatch):
     lib = fingerprint.build_library(conn, data_dir)
     assert lib.n_episodes == 4
     assert lib.stop == set(AD)  # all values ubiquitous -> all stop-listed
-    assert fingerprint.match_regions(PAD + AD + PAD, lib) == []
+    # floor passed explicitly so the stop-list is what makes this empty, not the emit floor
+    assert fingerprint.match_regions(PAD + AD + PAD, lib, min_region_frames=len(AD)) == []

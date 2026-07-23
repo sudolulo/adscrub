@@ -31,9 +31,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     episodes share the Flexcar DAI campaign with Casefile, caught cross-show from
     Casefile's library with zero CC labels — a library from one show recognises another
     show's ads when they share a programmatic campaign.
+  - **Stop-list: frequency proposes, editorial vetoes.** A value common across episodes is
+    only dropped if it ALSO appears in known non-ad audio, which is what distinguishes
+    silence/a music bed from a sponsor that simply runs in every episode. Measured on
+    Casefile: frequency alone 88.9% recall (but deletes any campaign in >30% of episodes —
+    Flexcar runs in 27/40 Casual Criminalist episodes); editorial alone 76.8% (far too
+    aggressive, 74,075 values stopped vs 1,173, because Chromaprint values collide between
+    ad and ordinary speech); **the intersection 89.6%, 669 stopped** — better recall than
+    either AND the ubiquitous sponsor survives.
+  - Emit floor (`MIN_REGION_FRAMES`, ~10s) drops the short music/filler fragments that were
+    the tier's main false positives. Swept against ground truth: costs 0.2pp of recall
+    (89.8% -> 89.6%) for ~12% less false-positive time; past ~15s real short ads start dying.
   - Not yet wired into `cut`/hark or run as an unsupervised auto-cut: residual false
     positives are short (~10s) fragments plus the occasional shared music bed, so a
     min-region guard and a review pass are the precision follow-ups.
+
+- **DAI probe results are now persisted** (`dai.dai_episode`, `adscrub dai`). The probe already
+  proved which bytes were server-inserted, and then threw the finding away — nothing was ever
+  written to `ad_segments`. Divergences are now stored as `dai` spans (byte offsets converted
+  through the file's average byte rate, trimmed at both ends, capped at one plausible ad break,
+  `confidence = 0.5`), giving ad discovery with **no transcript and no model**.
+  - The START is evidence; the END is only an upper bound, because the reconvergence anchor
+    locates where the two streams realign rather than where the insert stopped. So a `dai` span
+    seeds the AUDIO library (`FP_LIBRARY_SOURCES`) — where boundary slop is harmless, since
+    matching needs a long aligned run and any editorial bleed is what the stop-list removes —
+    but never the TEXT library (`repeats.GROUND_TRUTH_SOURCES` stays `llm`/`chapter`), where a
+    wrong boundary would teach the matcher editorial wording.
+  - A span is stored only when the probe both diverged AND realigned; without an end, storing
+    one would be a guess.
 
 ### Fixed
 

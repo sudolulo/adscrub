@@ -9,7 +9,8 @@ from pathlib import Path
 
 import httpx
 
-from . import __version__, chapters, cut, db, detect, feed, fingerprint, ingest, repeats, transcribe
+from . import (__version__, chapters, cut, dai, db, detect, feed, fingerprint, ingest, repeats,
+               transcribe)
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"
@@ -114,6 +115,31 @@ def cmd_repeats(args: argparse.Namespace) -> int:
     hit = sum(1 for r in results if r.found)
     print(f"matched {found} repeated ad span(s) across {hit} of {len(results)} episode(s) "
           f"({errors} failed) — {len(library):,} known ad shingles, no model called")
+    return 0
+
+
+def cmd_dai(args: argparse.Namespace) -> int:
+    conn = db.connect(args.db)
+    data_dir = Path(args.data_dir)
+    rows = conn.execute(
+        "SELECT * FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"
+        + (" LIMIT ?" if args.limit else ""),
+        (args.limit,) if args.limit else (),
+    ).fetchall()
+    if not rows:
+        print("no episodes with an audio_url", file=sys.stderr)
+        return 1
+    stored = 0
+    for ep in rows:
+        try:
+            r = dai.dai_episode(conn, ep, make_client, data_dir=data_dir)
+        except httpx.HTTPError as exc:
+            print(f"  FAIL  {ep['title']}: {exc}", file=sys.stderr)
+            continue
+        stored += r.stored
+        print(f"  {'ok  ' if r.stored else '..  '}  {ep['title']}: "
+              + ("server-inserted span stored" if r.stored else r.reason))
+    print(f"stored {stored} dai span(s) across {len(rows)} episode(s) — no transcript, no model")
     return 0
 
 
@@ -287,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int,
                    help="scan only the first N episodes by id — ad-hoc/testing only. There is no pending-queue (re-scanning is free and the library grows), so the pipeline runs this UNBOUNDED; a limit in a loop would rescan the same head forever and never reach the tail.")
     p.set_defaults(func=cmd_repeats)
+
+    p = sub.add_parser(
+        "dai", help="probe episodes for dynamically-inserted ads and store what diverged")
+    p.add_argument("--limit", type=int, help="max episodes to probe this run")
+    p.add_argument("--data-dir", default=os.environ.get("ADSCRUB_DATA_DIR", "data"),
+                   help="directory holding audio/ (default: $ADSCRUB_DATA_DIR or data)")
+    p.set_defaults(func=cmd_dai)
 
     p = sub.add_parser(
         "fingerprint",

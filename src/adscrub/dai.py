@@ -36,10 +36,15 @@ WHAT IT CANNOT DO
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import httpx
+
+from .audio import DEFAULT_DATA_DIR, probe_duration
+from .detect import DetectedAdSpan, insert_spans
 
 DEFAULT_BYTES = 6 * 1024 * 1024  # ~6MB: covers a typical pre-roll plus runway
 ANCHOR_SIZE = 4096
@@ -133,3 +138,90 @@ def probe_variance(
         reconverged=reconv is not None,
         reconvergence_byte=reconv,
     )
+
+
+# A probe result is bytes, not seconds, and the two are only related through the file's average
+# byte rate — exact for CBR mp3, approximate for VBR. Trim this much off each end before storing.
+DAI_EDGE_MARGIN = 2.0
+# Refuse to store a span longer than one plausible ad break. Guards against a bogus
+# reconvergence anchor turning half an episode into an "ad".
+MAX_DAI_BREAK = 240.0
+MIN_DAI_BREAK = 8.0
+
+
+@dataclass
+class DAIStoreResult:
+    episode_id: int
+    stored: int = 0
+    reason: str = ""
+
+
+def dai_episode(
+    conn: sqlite3.Connection,
+    episode: sqlite3.Row,
+    client_factory: Callable[[], httpx.Client],
+    data_dir: Path = DEFAULT_DATA_DIR,
+    **probe_kwargs,
+) -> DAIStoreResult:
+    """Probe one episode and store what diverged as a `dai` ad span. No model, no transcript.
+
+    WHAT THE STORED SPAN ACTUALLY MEANS — read before trusting it
+        The probe compares two independently-targeted fetches. Where they first differ is
+        provably server-inserted content, so the START is well-founded. The END is not: the
+        reconvergence anchor is taken far past the divergence, so it locates where the two
+        streams realign, which is an UPPER BOUND on where the inserted content ended, not the
+        end itself (recovering the exact length would need the ad length in the *other* stream,
+        which the probe never learns). The stored span is therefore a superset of the real ad,
+        trimmed by DAI_EDGE_MARGIN and capped at MAX_DAI_BREAK.
+
+        Two consequences, both deliberate:
+        - It is good enough to SEED THE FINGERPRINT LIBRARY. Boundary slop there costs nothing:
+          matching needs a long aligned run, and any editorial that bleeds into the span is
+          neutralised by the editorial stop-list, which drops exactly that audio.
+        - It is NOT good enough to seed the TEXT library (`repeats.GROUND_TRUTH_SOURCES` stays
+          `llm`/`chapter`), where a wrong boundary would teach the matcher editorial wording.
+
+    Also note the file we fingerprint is a THIRD fetch, so it may carry a different campaign
+    than either probed variant — that is fine and even useful: whatever sits at the divergence
+    point in our own copy is still a real inserted ad, and it is the copy we serve.
+
+    Idempotent: existing `dai` rows for the episode are replaced.
+    """
+    result = DAIStoreResult(episode_id=episode["id"])
+    probe = probe_variance(client_factory, episode["audio_url"], **probe_kwargs)
+    if not probe.diverged:
+        result.reason = "no divergence — static ads, or DAI not keyed on these signals"
+        return result
+    if not probe.reconverged:
+        result.reason = "diverged but never realigned in the fetched window — no usable end"
+        return result
+
+    audio_path = Path(data_dir) / "audio" / f"{episode['id']}.mp3"
+    if not audio_path.exists():
+        result.reason = "local audio not downloaded — cannot convert bytes to seconds"
+        return result
+    duration = probe_duration(audio_path)
+    size = audio_path.stat().st_size
+    if duration <= 0 or size <= 0:
+        result.reason = "unreadable audio"
+        return result
+
+    bytes_per_second = size / duration
+    start = probe.divergence_byte / bytes_per_second + DAI_EDGE_MARGIN
+    end = probe.reconvergence_byte / bytes_per_second - DAI_EDGE_MARGIN
+    end = min(end, start + MAX_DAI_BREAK, duration)
+    if end - start < MIN_DAI_BREAK:
+        result.reason = f"span too short after trimming ({end - start:.1f}s)"
+        return result
+
+    conn.execute("DELETE FROM ad_segments WHERE episode_id = ? AND source = 'dai'", (episode["id"],))
+    insert_spans(conn, episode["id"], [DetectedAdSpan(
+        start_second=start, end_second=end,
+        reason="two independently-targeted fetches diverged here (server-inserted)",
+        source="dai")])
+    # weaker than llm/chapter: the start is evidence, the end is an upper bound
+    conn.execute("UPDATE ad_segments SET confidence = 0.5 WHERE episode_id = ? AND source = 'dai'",
+                 (episode["id"],))
+    conn.commit()
+    result.stored = 1
+    return result
