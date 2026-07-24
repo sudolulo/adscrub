@@ -15,6 +15,21 @@ def test_is_anomalous_cut_flags_implausible_fraction():
     assert cut.is_anomalous_cut(400, 0) is False        # zero duration -> can't assess
 
 
+def test_hold_cut_reverts_to_original_and_drops_from_queue():
+    conn = db.connect(":memory:")
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.execute("INSERT INTO episodes (feed_id, guid, audio_url, cut_path) "
+                 "VALUES (1, 'g1', 'http://a/1.mp3', 'cut/1.mp3')")
+    conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
+                 "VALUES (1, 0, 10, 'chapter')")
+    conn.commit()
+    cut.hold_cut(conn, 1)
+    row = conn.execute("SELECT cut_path, cut_held_at FROM episodes WHERE id = 1").fetchone()
+    assert row["cut_path"] is None                      # feed falls back to the original audio
+    assert row["cut_held_at"] is not None
+    assert cut.pending_episodes(conn) == []             # not re-cut on the next cycle
+
+
 @pytest.fixture
 def conn(tmp_path):
     return db.connect(tmp_path / "test.db")

@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-07-24
+## [0.16.0] - 2026-07-24
+
+### Added
+
+- **`cut.hold_cut(conn, id)` turns the anomaly flag into listener protection.** When a cut is
+  anomalous (`is_anomalous_cut`, >35% of the episode — almost always a false positive eating
+  editorial), the caller now HOLDS it: `hold_cut` clears `cut_path` so the feed falls back to the
+  ORIGINAL audio, and stamps a new `cut_held_at` so `pending_episodes` won't re-cut it every
+  cycle. The cut file stays on disk for review. A likely-bad cut no longer reaches the player.
+
+### Changed
+
+- `episodes` gains a `cut_held_at TEXT` column; `cut.pending_episodes` excludes held episodes.
 
 ### Added
 

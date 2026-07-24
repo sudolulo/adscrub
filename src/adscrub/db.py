@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     llm_detected_at      TEXT,
     cut_path             TEXT,
     audio_gone_at        TEXT,
+    cut_held_at          TEXT,
     created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at           TEXT,
     UNIQUE (feed_id, guid)

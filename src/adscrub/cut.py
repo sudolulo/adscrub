@@ -60,6 +60,19 @@ def is_anomalous_cut(ad_seconds: float, duration_seconds: float | None) -> bool:
     return ad_seconds / duration_seconds > CUT_ANOMALY_FRACTION
 
 
+def hold_cut(conn: sqlite3.Connection, episode_id: int) -> None:
+    """Refuse to serve an anomalous cut: clear cut_path (so the feed falls back to the ORIGINAL
+    audio) and stamp cut_held_at so pending_episodes won't re-cut it every cycle. The cut file
+    itself is left on disk for review; a human decides whether the span was real. This is what
+    turns is_anomalous_cut from a warning into listener protection — a likely-false-positive cut
+    never reaches the player."""
+    conn.execute(
+        "UPDATE episodes SET cut_path = NULL, cut_held_at = ?, updated_at = ? WHERE id = ?",
+        (utcnow(), utcnow(), episode_id),
+    )
+    conn.commit()
+
+
 # How far an ad edge may be moved to land on silence. Ad breaks are bounded by a beat of
 # silence, so the true boundary is nearly always within a second or two of the detected one.
 SNAP_WINDOW = 2.5
@@ -208,6 +221,7 @@ def pending_episodes(
     query = f"""
         SELECT * FROM episodes
         WHERE cut_path IS NULL
+          AND cut_held_at IS NULL
           AND EXISTS (SELECT 1 FROM ad_segments
                       WHERE episode_id = episodes.id AND source IN ({placeholders}))
         ORDER BY id
