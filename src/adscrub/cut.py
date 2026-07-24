@@ -40,7 +40,7 @@ from .db import utcnow
 #   recur    cold-start self-recurrence; roughly 1 flagged region in 10 is not an ad at all
 # Both stay valuable for SEEDING and DISCOVERY, which is a different job from cutting. Opt in
 # deliberately (`--sources`) if you want them cut anyway.
-CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch")
+CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch", "manual")
 
 # A cut that removes more than this fraction of an episode is almost certainly wrong — a
 # false-positive tier eating editorial content, not an ad load. Even ad-heavy shows run ~10-30%

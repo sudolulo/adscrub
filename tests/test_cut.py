@@ -8,6 +8,13 @@ from adscrub import cut, db
 AUDIO_URL = "https://example.com/audio/ep1.mp3"
 
 
+def test_manual_marks_are_ground_truth_and_cuttable():
+    """A hand-marked ad ('manual') is the strongest evidence: cut, and it seeds both libraries."""
+    from adscrub import repeats
+    assert "manual" in cut.CUT_SOURCES
+    assert "manual" in repeats.GROUND_TRUTH_SOURCES
+
+
 def test_is_anomalous_cut_flags_implausible_fraction():
     assert cut.is_anomalous_cut(400, 1000) is True     # 40% of the episode -> flag
     assert cut.is_anomalous_cut(349, 1000) is False    # just under 35% -> fine
@@ -253,9 +260,10 @@ def test_untrusted_spans_are_not_removed_from_audio(tmp_path):
     conn.execute("INSERT INTO ad_segments (episode_id, start_second, end_second, source) "
                  "VALUES (?, 30.0, 40.0, 'recur')", (eid,))
     conn.commit()
+    ph = ",".join("?" * len(cut.CUT_SOURCES))
     rows = conn.execute(
-        "SELECT start_second, end_second FROM ad_segments WHERE episode_id=? AND source IN "
-        "(?,?,?,?)", (eid, *cut.CUT_SOURCES)).fetchall()
+        f"SELECT start_second, end_second FROM ad_segments WHERE episode_id=? AND source IN ({ph})",
+        (eid, *cut.CUT_SOURCES)).fetchall()
     assert [(r["start_second"], r["end_second"]) for r in rows] == [(10.0, 20.0)]
     # 30-40 survives in the audio because nothing trusted vouches for those edges
     keep = cut.compute_keep_spans([(r["start_second"], r["end_second"]) for r in rows], 60.0)
@@ -264,7 +272,7 @@ def test_untrusted_spans_are_not_removed_from_audio(tmp_path):
 
 def test_cut_sources_excludes_the_edge_unsafe_tiers():
     assert "dai" not in cut.CUT_SOURCES and "recur" not in cut.CUT_SOURCES
-    assert {"chapter", "llm", "repeat", "fpmatch"} == set(cut.CUT_SOURCES)
+    assert {"chapter", "llm", "repeat", "fpmatch", "manual"} == set(cut.CUT_SOURCES)
 
 
 # --- snapping cut edges to silence ---

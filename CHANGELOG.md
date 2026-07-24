@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-24
+
+### Added
+
+- **`manual` source — a hand-marked ad is ground truth.** Added to `repeats.GROUND_TRUTH_SOURCES`
+  (so it seeds both the text-repeat and fingerprint libraries and confirms a campaign) and to
+  `cut.CUT_SOURCES` (so it's cut). A human marking a span as an ad is the strongest evidence there
+  is; it ranks with `llm`/`chapter`. hark's UI writes these when an operator marks/corrects an ad
+  by hand.
+
 ## [0.17.0] - 2026-07-24
 
 ### Added

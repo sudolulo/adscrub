@@ -101,7 +101,10 @@ def _ad_segment_indices(transcript: list[dict], spans: Iterable[tuple[float, flo
 # 958 spans to 993, because each pass's guesses became the next pass's evidence, matched
 # more loosely, and drifted — a detector slowly hallucinating a larger and larger idea of
 # what an ad sounds like. Evidence in, inference out; never the reverse.
-GROUND_TRUTH_SOURCES = ("llm", "chapter")
+# `manual` = a human marked this span an ad by hand — the STRONGEST evidence there is, so it
+# ranks with llm/chapter: it seeds both libraries and confirms a campaign. (A human correction is
+# also how a false positive gets removed — see the cut path.)
+GROUND_TRUTH_SOURCES = ("llm", "chapter", "manual")
 
 
 def build_library(
