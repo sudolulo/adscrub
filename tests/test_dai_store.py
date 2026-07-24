@@ -94,3 +94,19 @@ def test_dai_seeds_the_audio_library_but_never_the_text_library():
     for fingerprint matching (which needs a long aligned run) and wrong for text shingles."""
     assert "dai" in fingerprint.FP_LIBRARY_SOURCES
     assert "dai" not in repeats.GROUND_TRUTH_SOURCES
+
+
+
+def test_store_probe_result_persists_without_reprobing(conn, episode, monkeypatch):
+    """hark already probes in its loop — it must be able to store the result it holds without
+    dai_episode re-fetching the episode."""
+    row, data_dir = episode
+    def boom(*a, **k):
+        raise AssertionError("re-probed when the result was already in hand")
+    monkeypatch.setattr(dai, "probe_variance", boom)
+    probe = dai.DAIProbeResult(bytes_compared=10, diverged=True, divergence_byte=20_000,
+                               reconverged=True, reconvergence_byte=80_000)
+    r = dai.store_probe_result(conn, row, probe, data_dir)
+    assert r.stored == 1
+    span = conn.execute("SELECT * FROM ad_segments WHERE source='dai'").fetchone()
+    assert span["confidence"] == 0.5

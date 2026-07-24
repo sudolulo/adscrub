@@ -187,8 +187,23 @@ def dai_episode(
 
     Idempotent: existing `dai` rows for the episode are replaced.
     """
-    result = DAIStoreResult(episode_id=episode["id"])
     probe = probe_variance(client_factory, episode["audio_url"], **probe_kwargs)
+    return store_probe_result(conn, episode, probe, data_dir)
+
+
+def store_probe_result(
+    conn: sqlite3.Connection,
+    episode: sqlite3.Row,
+    probe: DAIProbeResult,
+    data_dir: Path = DEFAULT_DATA_DIR,
+) -> DAIStoreResult:
+    """Persist an ALREADY-COMPUTED probe as a `dai` span. See dai_episode for what the span means.
+
+    Split out of dai_episode so a caller that already probed — hark runs `probe_variance` in its
+    own scheduled loop and shouldn't fetch the episode twice just to store the result — can hand
+    the DAIProbeResult straight in. dai_episode is now this plus the probe.
+    """
+    result = DAIStoreResult(episode_id=episode["id"])
     if not probe.diverged:
         result.reason = "no divergence — static ads, or DAI not keyed on these signals"
         return result

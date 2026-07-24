@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-24
+
+### Added
+
+- **`store_probe_result` — persist an already-computed DAI probe without re-probing.** Split
+  out of `dai_episode` (now that plus the probe) so a caller running `probe_variance` in its own
+  scheduled loop can store what it found instead of fetching the episode a second time. This is
+  what lets hark's in-container `dai-probe` seed the fingerprint library for free, rather than
+  discovering server-inserted ads every cycle and throwing them away.
+
+
 ## [0.12.0] - 2026-07-23
 
 ### Fixed
