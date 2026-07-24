@@ -659,3 +659,24 @@ def test_indexed_only_match_skips_unindexed_without_fpcalc(corpus, monkeypatch):
     assert conn.execute(
         "SELECT COUNT(*) c FROM ad_segments WHERE episode_id=? AND source='fpmatch'", (b,)
     ).fetchone()["c"] == 1
+
+
+def test_stream_index_covers_undownloaded_and_skips_quarantined(conn, data_dir, monkeypatch):
+    """The streaming index reaches episodes never downloaded (no local file), caching their
+    fingerprint without storing audio; quarantined (audio_gone_at) episodes are excluded."""
+    monkeypatch.setattr(fingerprint, "stream_fingerprint", lambda client, url: [1, 2, 3, 4, 5])
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.executemany(
+        "INSERT INTO episodes (feed_id, guid, audio_url) VALUES (1, ?, ?)",
+        [("live1", "http://a/1.mp3"), ("live2", "http://a/2.mp3"), ("dead", "http://a/3.mp3")])
+    conn.commit()
+    dead = conn.execute("SELECT id FROM episodes WHERE guid = 'dead'").fetchone()["id"]
+    conn.execute("UPDATE episodes SET audio_gone_at = 'gone' WHERE id = ?", (dead,))
+    conn.commit()
+
+    pending = fingerprint.pending_stream_index_ids(conn)
+    assert dead not in pending and len(pending) == 2       # no local file needed; gone excluded
+
+    r = fingerprint.stream_index_episodes(conn, client=object(), data_dir=data_dir, limit=10)
+    assert r.indexed == 2 and r.pending == 0
+    assert fingerprint.pending_stream_index_ids(conn) == []  # both cached now, queue drained

@@ -299,6 +299,68 @@ def index_episodes(
     return IndexResult(indexed=indexed, pending=len(pending) - indexed)
 
 
+def pending_stream_index_ids(
+    conn: sqlite3.Connection,
+    episode_ids: list[int] | None = None,
+) -> list[int]:
+    """Episodes with an audio_url and no cached fingerprint — the STREAMING index queue.
+
+    Unlike pending_index_ids this does NOT require the audio to be on disk (stream_index_episodes
+    fetches-and-discards it), so it can cover a corpus far larger than what was ever downloaded.
+    Quarantined audio (audio_gone_at) is excluded so a permanently-gone URL is not re-streamed
+    every run forever.
+    """
+    ensure_schema(conn)
+    have = {r[0] for r in conn.execute("SELECT episode_id FROM episode_fingerprints")}
+    scope = set(episode_ids) if episode_ids is not None else None
+    out = []
+    for (eid,) in conn.execute(
+        "SELECT id FROM episodes WHERE audio_url IS NOT NULL AND audio_gone_at IS NULL ORDER BY id"
+    ):
+        if scope is not None and eid not in scope:
+            continue
+        if eid not in have:
+            out.append(eid)
+    return out
+
+
+def stream_index_episodes(
+    conn: sqlite3.Connection,
+    client,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    episode_ids: list[int] | None = None,
+    limit: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> IndexResult:
+    """Fingerprint-and-cache un-indexed episodes by STREAMING their audio (never stored), so the
+    index can cover episodes that were never downloaded — decoupling fingerprint coverage from
+    the local audio the corpus keeps. Prefers already-local audio when present (cheaper, exact
+    duration), streams the rest. A per-episode fetch/fpcalc failure is skipped, not fatal, so the
+    episode is simply retried next run. EXPENSIVE (one full audio fetch per streamed episode):
+    the caller bounds it with `limit` and a slow cadence.
+    """
+    pending = pending_stream_index_ids(conn, episode_ids)
+    todo = pending[:limit] if limit else pending
+    indexed = 0
+    for n, eid in enumerate(todo, 1):
+        row = conn.execute("SELECT audio_url FROM episodes WHERE id = ?", (eid,)).fetchone()
+        url = row[0] if row else None
+        if url:
+            local = Path(data_dir) / "audio" / f"{eid}.mp3"
+            try:
+                if local.exists():
+                    fp, _ = episode_fingerprint(conn, eid, local)
+                else:
+                    fp, _ = stream_episode_fingerprint(conn, eid, url, client)
+                if fp:
+                    indexed += 1
+            except Exception:  # noqa: BLE001 — a bad URL / fpcalc must not abort the whole batch
+                pass
+        if on_progress:
+            on_progress(n, len(todo))
+    return IndexResult(indexed=indexed, pending=len(pending) - indexed)
+
+
 def stream_episode_fingerprint(
     conn: sqlite3.Connection, episode_id: int, audio_url: str, client
 ) -> tuple[list[int], float]:

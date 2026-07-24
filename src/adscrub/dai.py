@@ -47,6 +47,11 @@ from .audio import DEFAULT_DATA_DIR, probe_duration
 from .detect import DetectedAdSpan, insert_spans
 
 DEFAULT_BYTES = 6 * 1024 * 1024  # ~6MB: covers a typical pre-roll plus runway
+# When a divergence never realigns inside DEFAULT_BYTES the ad ran past the window — a mid-roll
+# block or a stacked pre-roll. Re-probe once with this larger window to find where it ends,
+# rather than discarding the whole detection for want of an end. ~20MB is ~20min of 128kbps mp3,
+# past any single ad break (MAX_DAI_BREAK caps the stored span regardless).
+ESCALATED_BYTES = 20 * 1024 * 1024
 ANCHOR_SIZE = 4096
 ANCHOR_SKIP = 200_000  # bytes past divergence before trying a reconvergence anchor
 
@@ -111,17 +116,16 @@ def _find_reconvergence(
     return pos if pos != -1 else None
 
 
-def probe_variance(
+def _probe_once(
     client_factory: Callable[[], httpx.Client],
     audio_url: str,
-    max_bytes: int = DEFAULT_BYTES,
-    user_agents: tuple[str, str] = USER_AGENTS[:2],
-    anchor_skip: int = ANCHOR_SKIP,
-    anchor_size: int = ANCHOR_SIZE,
+    max_bytes: int,
+    user_agents: tuple[str, str],
+    anchor_skip: int,
+    anchor_size: int,
 ) -> DAIProbeResult:
-    """Fetch `audio_url` with two different User-Agents, each through its own
-    freshly-built client (own cookie jar, own connection — see the module
-    docstring for why a shared client silently breaks this), and compare."""
+    """One A/B fetch pair over a `max_bytes` window: find where the two targeted streams first
+    differ, then whether/where they realign within the window."""
     with client_factory() as client_a:
         a = _fetch(client_a, audio_url, user_agents[0], max_bytes)
     with client_factory() as client_b:
@@ -138,6 +142,33 @@ def probe_variance(
         reconverged=reconv is not None,
         reconvergence_byte=reconv,
     )
+
+
+def probe_variance(
+    client_factory: Callable[[], httpx.Client],
+    audio_url: str,
+    max_bytes: int = DEFAULT_BYTES,
+    user_agents: tuple[str, str] = USER_AGENTS[:2],
+    anchor_skip: int = ANCHOR_SKIP,
+    anchor_size: int = ANCHOR_SIZE,
+    escalate_bytes: int = ESCALATED_BYTES,
+) -> DAIProbeResult:
+    """Fetch `audio_url` with two different User-Agents, each through its own freshly-built client
+    (own cookie jar, own connection — see the module docstring for why a shared client silently
+    breaks this), and compare.
+
+    If the cheap first window diverges but never realigns, the inserted block ran past it — a long
+    or stacked ad. Re-probe ONCE with `escalate_bytes` (a fresh, self-consistent pair, since a
+    re-fetch may carry a different campaign than the first) so the end can be found further out.
+    The escalated result is only preferred when it actually locates a reconvergence; otherwise the
+    original stands. Set escalate_bytes=0 to disable (tests, or bandwidth-constrained runs)."""
+    result = _probe_once(client_factory, audio_url, max_bytes, user_agents, anchor_skip, anchor_size)
+    if result.diverged and not result.reconverged and escalate_bytes > max_bytes:
+        bigger = _probe_once(
+            client_factory, audio_url, escalate_bytes, user_agents, anchor_skip, anchor_size)
+        if bigger.diverged and bigger.reconverged:
+            return bigger
+    return result
 
 
 # A probe result is bytes, not seconds, and the two are only related through the file's average

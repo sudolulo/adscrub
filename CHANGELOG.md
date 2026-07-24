@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-24
+
+### Added
+
+- **DAI probe escalates to a larger window to find a long ad's end.** When the cheap first window
+  (`DEFAULT_BYTES`) diverges but never realigns — a mid-roll or stacked ad that ran past it —
+  `probe_variance` now re-probes once with `ESCALATED_BYTES` (~20MB), a fresh self-consistent
+  fetch pair, and prefers that result only if it actually locates a reconvergence. Previously such
+  a detection was discarded for want of an end (`"diverged but never realigned"`). Set
+  `escalate_bytes=0` to disable.
+- **Streaming fingerprint index (`stream_index_episodes` + `pending_stream_index_ids`).**
+  Fingerprint-and-cache un-indexed episodes by streaming their audio (fetch-and-discard, never
+  stored), so the index can cover a corpus far larger than what was ever downloaded — decoupling
+  fingerprint coverage from local storage. Prefers already-local audio when present; excludes
+  `audio_gone_at`-quarantined episodes; a per-episode fetch/fpcalc failure is skipped, not fatal.
+  Expensive (one full fetch per streamed episode) — the caller bounds it with a limit + cadence.
+
 ## [0.16.0] - 2026-07-24
 
 ### Added

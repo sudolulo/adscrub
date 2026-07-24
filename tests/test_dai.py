@@ -78,6 +78,40 @@ def test_short_window_with_no_room_for_an_anchor_reports_no_reconvergence():
     assert result.reconverged is False
 
 
+def _range_factory(by_user_agent: dict[str, bytes]):
+    """Like client_factory_returning but honours the Range header, so max_bytes actually
+    truncates the fetched window (needed to exercise the escalation path)."""
+
+    def handler(request):
+        body = by_user_agent[request.headers.get("user-agent", "")]
+        rng = request.headers.get("range", "")
+        if rng.startswith("bytes=0-"):
+            body = body[: int(rng.split("-")[1]) + 1]
+        return httpx.Response(200, content=body)
+
+    return lambda: httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_escalates_to_a_larger_window_to_find_a_long_ads_end():
+    """A divergence that never realigns inside the first window (a long/mid-roll ad) is re-probed
+    at a larger window so its end can be found — instead of being discarded for want of an end."""
+    prefix = b"COMMON" * 100                       # 600 shared bytes before the ad
+    tail = bytes(range(256)) * 40                   # 10240 shared post-ad bytes (holds the anchor)
+    a = prefix + b"A" * 5000 + tail
+    b = prefix + b"B" * 5000 + tail                 # a different, equally-long ad, then realign
+    factory = _range_factory({dai.USER_AGENTS[0]: a, dai.USER_AGENTS[1]: b})
+    small = len(prefix) + 100                        # window ends inside the ad -> no realign visible
+
+    off = dai.probe_variance(factory, URL, max_bytes=small, anchor_skip=5200, anchor_size=256,
+                             escalate_bytes=0)        # escalation disabled
+    assert off.diverged is True and off.reconverged is False
+
+    on = dai.probe_variance(factory, URL, max_bytes=small, anchor_skip=5200, anchor_size=256,
+                            escalate_bytes=len(a))     # escalation finds the end further out
+    assert on.diverged is True and on.reconverged is True
+    assert on.reconvergence_byte is not None
+
+
 def test_each_fetch_gets_an_independent_client_not_a_shared_cookie_jar():
     """Regression: a single shared client auto-replays whatever Set-Cookie the
     first fetch's response carried, silently making the second fetch look
@@ -94,4 +128,5 @@ def test_each_fetch_gets_an_independent_client_not_a_shared_cookie_jar():
 
     factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
     dai.probe_variance(factory, URL, max_bytes=1000)
-    assert seen_cookies == [None, None]  # neither fetch ever carried a cookie
+    assert len(seen_cookies) >= 2                    # the two base fetches (plus any escalation)
+    assert all(c is None for c in seen_cookies)      # NO fetch ever carried a cookie — isolation holds
