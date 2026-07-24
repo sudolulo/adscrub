@@ -176,3 +176,33 @@ def test_pending_episodes_respects_limit(conn):
     conn.commit()
     assert len(transcribe.pending_episodes(conn, limit=1)) == 1
     assert len(transcribe.pending_episodes(conn)) == 2
+
+
+# --- audio-gone quarantine ---
+
+
+def _http_error(status):
+    req = httpx.Request("GET", AUDIO_URL)
+    return httpx.HTTPStatusError("x", request=req, response=httpx.Response(status, request=req))
+
+
+def test_is_audio_gone_only_for_permanent_statuses():
+    assert transcribe.is_audio_gone(_http_error(410)) is True
+    assert transcribe.is_audio_gone(_http_error(404)) is True
+    assert transcribe.is_audio_gone(_http_error(403)) is False   # UA/geo-gating, may retry-pass
+    assert transcribe.is_audio_gone(_http_error(500)) is False   # transient
+    assert transcribe.is_audio_gone(OSError("disk")) is False    # not an HTTP error at all
+
+
+def test_mark_audio_gone_drops_it_from_pending(conn):
+    conn.execute("INSERT INTO feeds (source_url) VALUES ('http://feed')")
+    conn.executemany(
+        "INSERT INTO episodes (feed_id, guid, audio_url) VALUES (1, ?, ?)",
+        [("live", "http://a/1.mp3"), ("dead", "http://a/2.mp3")],
+    )
+    conn.commit()
+    dead_id = conn.execute("SELECT id FROM episodes WHERE guid = 'dead'").fetchone()["id"]
+    transcribe.mark_audio_gone(conn, dead_id)
+    assert [ep["guid"] for ep in transcribe.pending_episodes(conn)] == ["live"]  # dead skipped
+    assert conn.execute("SELECT audio_gone_at FROM episodes WHERE id = ?",
+                        (dead_id,)).fetchone()["audio_gone_at"] is not None

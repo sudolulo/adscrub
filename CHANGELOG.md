@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.14.0] - 2026-07-24
+## [0.15.0] - 2026-07-24
+
+### Added
+
+- **Permanently-gone audio is quarantined instead of head-of-line-blocking the queue.**
+  `transcribe.is_audio_gone(exc)` classifies a 404/410 as a dead URL (rotated/expired CDN link,
+  episode pulled) — distinct from a transient outage — and `transcribe.mark_audio_gone(conn, id)`
+  sets a new `episodes.audio_gone_at`, which `pending_episodes` now excludes. Without this, a
+  handful of dead URLs at the head of the queue trip the caller's consecutive-failure abort
+  before any live episode is reached, so the whole corpus stops transcribing (observed live:
+  `transcribed 0 (5 failed, 26538 pending)` every cycle). 403 is deliberately NOT treated as
+  gone — it is often UA/geo-gating a differently-shaped fetch can pass.
+- **Cut-quality signal: `cut.is_anomalous_cut(ad_seconds, duration_seconds)`** flags a cut that
+  removes more than `CUT_ANOMALY_FRACTION` (0.35) of an episode — almost always a false positive
+  eating editorial, not a genuine ad load. The caller flags it for review rather than shipping a
+  gutted episode silently. Returns False when the duration is unknown (can't assess).
+
+### Changed
+
+- `episodes` gains an `audio_gone_at TEXT` column (fresh-DB schema; hark adds it via migration).
 
 ### Added
 

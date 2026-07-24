@@ -8,6 +8,13 @@ from adscrub import cut, db
 AUDIO_URL = "https://example.com/audio/ep1.mp3"
 
 
+def test_is_anomalous_cut_flags_implausible_fraction():
+    assert cut.is_anomalous_cut(400, 1000) is True     # 40% of the episode -> flag
+    assert cut.is_anomalous_cut(349, 1000) is False    # just under 35% -> fine
+    assert cut.is_anomalous_cut(400, None) is False     # unknown duration -> can't assess
+    assert cut.is_anomalous_cut(400, 0) is False        # zero duration -> can't assess
+
+
 @pytest.fixture
 def conn(tmp_path):
     return db.connect(tmp_path / "test.db")

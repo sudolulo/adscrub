@@ -66,6 +66,27 @@ def load_model(model_size: str = DEFAULT_MODEL):
 
 _CUDA_RUNTIME_ERROR_MARKERS = ("cublas", "cudnn")
 
+# HTTP statuses that mean the audio is permanently gone, not a transient outage: the CDN URL
+# was rotated/expired or the episode was pulled from the feed. Retrying these forever
+# head-of-line-blocks the whole transcription queue — a handful of dead URLs at the front trips
+# the caller's consecutive-failure abort before any live episode is ever reached. Quarantine
+# them (mark audio_gone_at) so pending_episodes skips them and the queue advances. 403 is
+# deliberately excluded: it is often listener/UA-gating a differently-shaped fetch can pass
+# (the same signal the DAI probe exploits), not a permanent removal.
+AUDIO_GONE_STATUSES = frozenset({404, 410})
+
+
+def is_audio_gone(exc: BaseException) -> bool:
+    """True if `exc` is an HTTP error meaning the audio is permanently unfetchable (404/410)."""
+    return (isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code in AUDIO_GONE_STATUSES)
+
+
+def mark_audio_gone(conn: sqlite3.Connection, episode_id: int) -> None:
+    """Flag an episode's audio as permanently gone so pending_episodes() stops offering it."""
+    conn.execute("UPDATE episodes SET audio_gone_at = ? WHERE id = ?", (utcnow(), episode_id))
+    conn.commit()
+
 
 def transcribe_episode(
     conn: sqlite3.Connection,
@@ -127,6 +148,7 @@ def pending_episodes(conn: sqlite3.Connection, limit: int | None = None) -> list
     query = """
         SELECT * FROM episodes
         WHERE transcript_path IS NULL AND audio_url IS NOT NULL
+          AND audio_gone_at IS NULL
           AND id NOT IN (SELECT episode_id FROM ad_segments WHERE source = 'chapter')
         ORDER BY id
     """

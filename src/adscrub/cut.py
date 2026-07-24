@@ -42,6 +42,23 @@ from .db import utcnow
 # deliberately (`--sources`) if you want them cut anyway.
 CUT_SOURCES = ("chapter", "llm", "repeat", "fpmatch")
 
+# A cut that removes more than this fraction of an episode is almost certainly wrong — a
+# false-positive tier eating editorial content, not an ad load. Even ad-heavy shows run ~10-30%
+# ads; past this, the likeliest explanation is a bad span, not a genuinely ad-saturated episode.
+# The cut still happens (the audio is served), but the caller should FLAG it for review rather
+# than let a gutted episode go out silently. This is the production cut-quality signal there was
+# otherwise none of.
+CUT_ANOMALY_FRACTION = 0.35
+
+
+def is_anomalous_cut(ad_seconds: float, duration_seconds: float | None) -> bool:
+    """True if `ad_seconds` is an implausibly large share of the episode (likely a false
+    positive worth flagging). False when the duration is unknown/zero — can't assess, don't cry
+    wolf."""
+    if not duration_seconds or duration_seconds <= 0:
+        return False
+    return ad_seconds / duration_seconds > CUT_ANOMALY_FRACTION
+
 
 # How far an ad edge may be moved to land on silence. Ad breaks are bounded by a beat of
 # silence, so the true boundary is nearly always within a second or two of the detected one.
