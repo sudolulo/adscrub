@@ -616,3 +616,46 @@ def test_speech_corroboration_is_skipped_without_a_transcript():
     spans = [fingerprint.DetectedAdSpan(10.0, 20.0, "r", "fpmatch")]
     assert fingerprint.drop_speechless_spans(spans, []) == spans
     assert fingerprint.drop_speechless_spans(spans, None) == spans
+
+
+# --- incremental index / match split ---
+
+
+def test_index_episodes_advances_a_bounded_queue(corpus, monkeypatch):
+    """The pending queue is 'local audio, no cached fingerprint' — it shrinks as episodes are
+    indexed, so bounded runs spread the one-time backfill instead of stalling."""
+    conn, data_dir, a, b = corpus
+    fingerprint.ensure_schema(conn)
+    conn.execute("DELETE FROM episode_fingerprints")  # start un-indexed
+    conn.commit()
+    assert set(fingerprint.pending_index_ids(conn, data_dir)) == {a, b}
+
+    r1 = fingerprint.index_episodes(conn, data_dir, limit=1)
+    assert r1.indexed == 1 and r1.pending == 1          # one done, one remaining
+    assert conn.execute("SELECT COUNT(*) c FROM episode_fingerprints").fetchone()["c"] == 1
+
+    r2 = fingerprint.index_episodes(conn, data_dir, limit=5)
+    assert r2.indexed == 1 and r2.pending == 0          # queue drained
+    assert fingerprint.pending_index_ids(conn, data_dir) == []
+
+
+def test_indexed_only_match_skips_unindexed_without_fpcalc(corpus, monkeypatch):
+    """Matching must never fpcalc: an un-indexed episode is skipped, a cached one is matched."""
+    conn, data_dir, a, b = corpus
+    fingerprint.ensure_schema(conn)
+    conn.execute("DELETE FROM episode_fingerprints")
+    conn.commit()
+    fingerprint.index_episodes(conn, data_dir, episode_ids=[b])  # index only ep-b
+
+    def boom(*a, **k):
+        raise AssertionError("indexed_only matching must not run fpcalc")
+    monkeypatch.setattr(fingerprint, "_fpcalc", boom)
+    monkeypatch.setattr(fingerprint, "download_audio", boom)
+
+    results = fingerprint.apply_fingerprints(conn, client=None, data_dir=data_dir, indexed_only=True)
+    scanned = {r.episode_id for r in results}
+    assert a not in scanned          # un-indexed ep-a skipped, not errored
+    assert b in scanned              # ep-b matched from cache
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM ad_segments WHERE episode_id=? AND source='fpmatch'", (b,)
+    ).fetchone()["c"] == 1

@@ -241,6 +241,64 @@ def cached_fingerprint(
     return (fp, duration) if fp else None
 
 
+@dataclass
+class IndexResult:
+    indexed: int = 0
+    pending: int = 0   # still un-indexed after this run — the queue's remaining depth
+
+
+def pending_index_ids(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    episode_ids: list[int] | None = None,
+) -> list[int]:
+    """Episodes with local audio but NO cached fingerprint yet — the index queue.
+
+    This is a real pending queue that shrinks, unlike matching (which re-scans by design). It's
+    what lets fingerprinting run incrementally: each cycle indexes a bounded slice of new
+    episodes instead of the whole corpus, so a fresh deploy's backfill spreads over cycles
+    rather than stalling the pipeline for hours on first run.
+    """
+    ensure_schema(conn)
+    have = {r[0] for r in conn.execute("SELECT episode_id FROM episode_fingerprints")}
+    audio = Path(data_dir) / "audio"
+    scope = set(episode_ids) if episode_ids is not None else None
+    out = []
+    for (eid,) in conn.execute("SELECT id FROM episodes WHERE audio_url IS NOT NULL ORDER BY id"):
+        if scope is not None and eid not in scope:
+            continue
+        if eid not in have and (audio / f"{eid}.mp3").exists():
+            out.append(eid)
+    return out
+
+
+def index_episodes(
+    conn: sqlite3.Connection,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    episode_ids: list[int] | None = None,
+    limit: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> IndexResult:
+    """Fingerprint-and-cache up to `limit` un-indexed episodes. The tier's one expensive step.
+
+    fpcalc over a whole episode is the only real cost here, and it happens exactly once per
+    episode (episode_fingerprint caches it). Splitting it out from matching — which is cheap
+    set-lookups over the cache — is what makes the tier safe to run every cycle: index a
+    bounded slice, match everything. Returns how many were indexed and how many remain.
+    """
+    pending = pending_index_ids(conn, data_dir, episode_ids)
+    todo = pending[:limit] if limit else pending
+    indexed = 0
+    for n, eid in enumerate(todo, 1):
+        audio = Path(data_dir) / "audio" / f"{eid}.mp3"
+        fp, _ = episode_fingerprint(conn, eid, audio)  # caches
+        if fp:
+            indexed += 1
+        if on_progress:
+            on_progress(n, len(todo))
+    return IndexResult(indexed=indexed, pending=len(pending) - indexed)
+
+
 def stream_episode_fingerprint(
     conn: sqlite3.Connection, episode_id: int, audio_url: str, client
 ) -> tuple[list[int], float]:
@@ -957,6 +1015,7 @@ def fingerprint_episode(
     detector: AudioFingerprintDetector,
     client,
     data_dir: Path = DEFAULT_DATA_DIR,
+    indexed_only: bool = False,
 ) -> int:
     """Scan ONE episode's audio against the library and store what matches. Returns count.
 
@@ -966,11 +1025,25 @@ def fingerprint_episode(
     rather than duplicates. `llm`/`chapter`/`repeat` rows are never touched — this tier only
     ever speaks for itself. Mirrors repeats.repeat_episode / detect.detect_episode so a
     caller with its own episode selection (e.g. hark's per-show filter) can drive it.
+
+    `indexed_only` matches from the cached fingerprint only — no download, no fpcalc — and
+    returns -1 to mean "skipped, not yet indexed" so the caller can leave indexing to the
+    bounded index stage. This is the cheap side of the index/match split (see index_episodes).
     """
-    audio_path = download_audio(
-        client, episode["audio_url"], Path(data_dir) / "audio" / f"{episode['id']}.mp3"
-    )
-    fp, duration = episode_fingerprint(conn, episode["id"], audio_path)
+    if indexed_only:
+        got = None
+        row = conn.execute(
+            "SELECT fingerprint, duration FROM episode_fingerprints WHERE episode_id = ?",
+            (episode["id"],),
+        ).fetchone()
+        if row is None:
+            return -1  # not indexed yet; the index stage owns fetching+fingerprinting it
+        fp, duration = _parse_fingerprint(row[0]), row[1]
+    else:
+        audio_path = download_audio(
+            client, episode["audio_url"], Path(data_dir) / "audio" / f"{episode['id']}.mp3"
+        )
+        fp, duration = episode_fingerprint(conn, episode["id"], audio_path)
     spans = detector.match_fingerprint(fp, duration, exclude_episode_id=episode["id"])
     # Corroborate against the transcript when the episode has one. Free, and it removes the
     # music/room-tone matches an audio-only tier is blind to (see drop_speechless_spans).
@@ -998,6 +1071,7 @@ def apply_fingerprints(
     data_dir: Path = DEFAULT_DATA_DIR,
     limit: int | None = None,
     on_result: Callable[[FingerprintResult], None] | None = None,
+    indexed_only: bool = False,
 ) -> list[FingerprintResult]:
     """Scan episodes' audio against the corpus's own confirmed ad recordings.
 
@@ -1005,6 +1079,11 @@ def apply_fingerprints(
     re-scanning is the point — the library grows, so an episode scanned when ten ads were
     known deserves another look at a hundred. Scans episodes that HAVE an audio_url; the
     per-episode download is cached, so a re-run costs only the fingerprint compute.
+
+    `indexed_only` matches only episodes already in the fingerprint cache — no download, no
+    fpcalc — leaving the expensive indexing to `index_episodes`. This is how the pipeline runs
+    matching every cycle cheaply while the one-time backfill spreads across bounded index runs.
+    Un-indexed episodes are skipped (not counted as scanned), not errored.
     """
     if not fpcalc_available():
         raise RuntimeError("fpcalc (Chromaprint / libchromaprint-tools) is not installed")
@@ -1023,7 +1102,10 @@ def apply_fingerprints(
     for row in conn.execute(query, params).fetchall():
         result = FingerprintResult(episode_id=row["id"], title=row["title"] or "")
         try:
-            result.found = fingerprint_episode(conn, row, detector, client, data_dir)
+            found = fingerprint_episode(conn, row, detector, client, data_dir, indexed_only)
+            if found < 0:
+                continue  # not yet indexed; skipped silently, left to the index stage
+            result.found = found
         except Exception as exc:  # noqa: BLE001 — one bad episode must not stop the sweep
             conn.rollback()
             result.error = str(exc)

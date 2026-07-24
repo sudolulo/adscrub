@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-24
+
+### Added
+
+- **Incremental fingerprint indexing splits the tier's one expensive step from its cheap one.**
+  `index_episodes(limit=N)` fingerprints-and-caches up to N episodes drawn from a real pending
+  queue (`pending_index_ids`: local audio, no cached fingerprint yet — it shrinks). Matching
+  gains `apply_fingerprints(indexed_only=True)` / `fingerprint_episode(indexed_only=True)`, which
+  match only cache hits — no download, no fpcalc — and skip (not error) an un-indexed episode.
+  - This is what makes the tier safe to run every pipeline cycle: index a bounded slice, match
+    everything cached. The whole-corpus backfill (1,344 episodes, ~15s of fpcalc each) spreads
+    across cycles instead of stalling the pipeline for hours on first run, and an episode is
+    fpcalc'd exactly once ever.
+
+
 ## [0.13.0] - 2026-07-24
 
 ### Added
