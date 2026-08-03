@@ -17,15 +17,14 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
 from .audio import DEFAULT_DATA_DIR, download_audio, probe_duration
 from .db import utcnow
-
 
 # Which sources are trusted to REMOVE AUDIO. The test is not "is this span evidence or
 # inference" — `repeat` and `fpmatch` are inference and are exactly what the cheap tiers exist to
@@ -87,7 +86,7 @@ def detect_silences(
     proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-i", str(audio_path),
          "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}", "-f", "null", "-"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     silences: list[tuple[float, float]] = []
     start: float | None = None

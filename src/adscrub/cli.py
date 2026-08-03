@@ -9,8 +9,19 @@ from pathlib import Path
 
 import httpx
 
-from . import (__version__, chapters, cut, dai, db, detect, feed, fingerprint, ingest, repeats,
-               transcribe)
+from . import (
+    __version__,
+    chapters,
+    cut,
+    dai,
+    db,
+    detect,
+    feed,
+    fingerprint,
+    ingest,
+    repeats,
+    transcribe,
+)
 
 DEFAULT_DB = os.environ.get("ADSCRUB_DB", "adscrub.db")
 USER_AGENT = f"adscrub/{__version__} (homelab podcast ad-removal proxy)"

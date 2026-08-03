@@ -57,12 +57,11 @@ import sqlite3
 import subprocess
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .audio import DEFAULT_DATA_DIR, MAX_AUDIO_BYTES, download_audio, probe_duration
-from .db import utcnow
 from .detect import DetectedAdSpan, insert_spans
 from .repeats import GROUND_TRUTH_SOURCES
 
@@ -141,7 +140,7 @@ def _fpcalc(path: str | Path, length: int = FP_LENGTH) -> list[int]:
     """Raw Chromaprint sub-fingerprints for a whole audio file (any format fpcalc reads)."""
     out = subprocess.run(
         ["fpcalc", "-raw", "-length", str(length), str(path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     for line in out.stdout.splitlines():
         if line.startswith("FINGERPRINT="):
@@ -354,7 +353,7 @@ def stream_index_episodes(
                     fp, _ = stream_episode_fingerprint(conn, eid, url, client)
                 if fp:
                     indexed += 1
-            except Exception:  # noqa: BLE001 — a bad URL / fpcalc must not abort the whole batch
+            except Exception:  # noqa: BLE001, S110 — a bad URL / fpcalc must not abort the whole batch
                 pass
         if on_progress:
             on_progress(n, len(todo))
@@ -1093,7 +1092,6 @@ def fingerprint_episode(
     bounded index stage. This is the cheap side of the index/match split (see index_episodes).
     """
     if indexed_only:
-        got = None
         row = conn.execute(
             "SELECT fingerprint, duration FROM episode_fingerprints WHERE episode_id = ?",
             (episode["id"],),
@@ -1109,7 +1107,7 @@ def fingerprint_episode(
     spans = detector.match_fingerprint(fp, duration, exclude_episode_id=episode["id"])
     # Corroborate against the transcript when the episode has one. Free, and it removes the
     # music/room-tone matches an audio-only tier is blind to (see drop_speechless_spans).
-    transcript_path = episode["transcript_path"] if "transcript_path" in episode.keys() else None
+    transcript_path = episode["transcript_path"] if "transcript_path" in episode.keys() else None  # noqa: SIM118 — sqlite3.Row has keys() but no __contains__ or .get()
     if transcript_path:
         try:
             with open(transcript_path, encoding="utf-8") as fh:

@@ -188,7 +188,7 @@ def test_apply_fingerprints_finds_the_unlabelled_copy(corpus):
 
 
 def test_apply_fingerprints_is_idempotent(corpus):
-    conn, data_dir, a, b = corpus
+    conn, data_dir, _a, b = corpus
     for _ in range(3):
         fingerprint.apply_fingerprints(conn, client=None, data_dir=data_dir)
     n = conn.execute(
@@ -200,7 +200,7 @@ def test_apply_fingerprints_is_idempotent(corpus):
 def test_fpmatch_never_becomes_library_evidence(corpus):
     """A fpmatch span is inference; if it seeded the library the detector would bootstrap off
     its own guesses, the drift repeats.py was bitten by. GROUND_TRUTH_SOURCES excludes it."""
-    conn, data_dir, a, b = corpus
+    conn, data_dir, _a, _b = corpus
     fingerprint.apply_fingerprints(conn, client=None, data_dir=data_dir)
     assert conn.execute("SELECT COUNT(*) c FROM ad_segments WHERE source='fpmatch'").fetchone()["c"] > 0
     # only the one ground-truth ad is ever fingerprinted into the cache
@@ -221,7 +221,7 @@ def test_apply_fingerprints_never_touches_other_sources_or_marks_detected(corpus
 
 
 def test_library_is_cached_not_recomputed(corpus, monkeypatch):
-    conn, data_dir, a, b = corpus
+    conn, data_dir, _a, _b = corpus
     fingerprint.build_library(conn, data_dir)  # first build fingerprints ep-a's ad
     # a second build must not re-fingerprint anything already cached
     def boom(p, s, e):
@@ -234,7 +234,7 @@ def test_library_is_cached_not_recomputed(corpus, monkeypatch):
 def test_episode_fingerprint_is_cached_across_rescans(corpus, monkeypatch):
     """The whole-episode fpcalc is the tier's only real cost; a re-scan (library grew) must
     re-run only the matching, never the decode."""
-    conn, data_dir, a, b = corpus
+    conn, data_dir, _a, b = corpus
     fingerprint.apply_fingerprints(conn, client=None, data_dir=data_dir)
     assert conn.execute("SELECT COUNT(*) c FROM episode_fingerprints").fetchone()["c"] == 2
 
@@ -420,7 +420,7 @@ def campaigns_corpus(conn, data_dir, monkeypatch):
 
 def test_finds_one_campaign_per_recording_not_per_episode(campaigns_corpus):
     """7 episodes carrying 3 recordings must yield 3 campaigns, not 7 findings."""
-    conn, data_dir, eids = campaigns_corpus
+    conn, data_dir, _eids = campaigns_corpus
     camps = fingerprint.find_campaigns(conn, data_dir)
     assert len(camps) == 3
     assert sorted(c.reach for c in camps) == [2, 3, 3]
@@ -481,7 +481,7 @@ def test_already_read_campaigns_are_not_selected_again(campaigns_corpus):
 
 
 def test_seed_selection_respects_limit(campaigns_corpus):
-    conn, data_dir, eids = campaigns_corpus
+    conn, data_dir, _eids = campaigns_corpus
     assert len(fingerprint.select_seed_episodes(conn, data_dir, limit=1)) == 1
 
 

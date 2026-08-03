@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,7 +29,7 @@ from . import __version__, db
 def _parse_pubdate(value: str | None) -> datetime | None:
     if not value:
         return None
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 def build_feed(conn: sqlite3.Connection, feed: sqlite3.Row, base_url: str) -> bytes:

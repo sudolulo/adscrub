@@ -126,7 +126,7 @@ def test_each_fetch_gets_an_independent_client_not_a_shared_cookie_jar():
         body = b"a" * 50 if ua == dai.USER_AGENTS[0] else b"b" * 50
         return httpx.Response(200, content=body, headers={"set-cookie": "listenerid=tracked; Path=/"})
 
-    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))
     dai.probe_variance(factory, URL, max_bytes=1000)
     assert len(seen_cookies) >= 2                    # the two base fetches (plus any escalation)
     assert all(c is None for c in seen_cookies)      # NO fetch ever carried a cookie — isolation holds

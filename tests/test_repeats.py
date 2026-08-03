@@ -57,7 +57,7 @@ def corpus(conn, tmp_path):
 
 
 def test_recognises_the_same_ad_read_in_another_episode(corpus):
-    conn, a, b = corpus
+    conn, _a, _b = corpus
     detector = repeats.RepeatAdDetector(repeats.build_library(conn))
     spans = detector.detect(AD_B)
     assert len(spans) == 1
@@ -68,7 +68,7 @@ def test_recognises_the_same_ad_read_in_another_episode(corpus):
 
 
 def test_leaves_editorial_alone(corpus):
-    conn, a, b = corpus
+    conn, _a, _b = corpus
     detector = repeats.RepeatAdDetector(repeats.build_library(conn))
     editorial = [
         {"start": 0.0, "end": 5.0, "text": "The detective arrived at the scene just after midnight."},
@@ -78,7 +78,7 @@ def test_leaves_editorial_alone(corpus):
 
 
 def test_an_episode_cannot_be_its_own_library(corpus):
-    conn, a, b = corpus
+    conn, a, _b = corpus
     lib = repeats.build_library(conn, exclude_episode_id=a)
     # ep-a's ad was the ONLY confirmed one, so excluding it leaves nothing to match against
     assert repeats.RepeatAdDetector(lib).detect(AD_A) == []
@@ -92,7 +92,7 @@ def test_empty_library_detects_nothing():
 
 
 def test_apply_repeats_finds_the_unlabelled_copy(corpus):
-    conn, a, b = corpus
+    conn, _a, b = corpus
     results = repeats.apply_repeats(conn)
     found = {r.episode_id: r.found for r in results}
     assert found[b] == 1
@@ -104,7 +104,7 @@ def test_apply_repeats_finds_the_unlabelled_copy(corpus):
 
 def test_apply_repeats_is_idempotent(corpus):
     """The library grows, so re-scanning is expected — it must refresh, not accumulate."""
-    conn, a, b = corpus
+    conn, _a, b = corpus
     repeats.apply_repeats(conn)
     repeats.apply_repeats(conn)
     repeats.apply_repeats(conn)
@@ -118,7 +118,7 @@ def test_library_ignores_the_tier_s_own_output(corpus):
     """A repeat span is an inference, not evidence. If it feeds back into the library, the
     detector bootstraps off its own guesses and drifts — on the real corpus a second sweep
     went 958 -> 993 spans before this was fixed."""
-    conn, a, b = corpus
+    conn, _a, _b = corpus
     before = repeats.build_library(conn)
     repeats.apply_repeats(conn)  # writes source='repeat' rows
     assert conn.execute(
@@ -129,7 +129,7 @@ def test_library_ignores_the_tier_s_own_output(corpus):
 
 
 def test_apply_repeats_never_touches_other_sources(corpus):
-    conn, a, b = corpus
+    conn, a, _b = corpus
     repeats.apply_repeats(conn)
     llm = conn.execute(
         "SELECT COUNT(*) c FROM ad_segments WHERE episode_id = ? AND source = 'llm'", (a,)
@@ -139,7 +139,7 @@ def test_apply_repeats_never_touches_other_sources(corpus):
 
 def test_apply_repeats_does_not_mark_the_episode_llm_detected(corpus):
     """A free pass that never read the words must not retire the episode from the LLM."""
-    conn, a, b = corpus
+    conn, _a, b = corpus
     repeats.apply_repeats(conn)
     row = conn.execute("SELECT llm_detected_at FROM episodes WHERE id = ?", (b,)).fetchone()
     assert row["llm_detected_at"] is None
@@ -150,7 +150,7 @@ def test_apply_repeats_does_not_mark_the_episode_llm_detected(corpus):
 
 def test_layered_detector_unions_its_tiers(corpus):
     """Composing tiers must need no branching — and each span keeps its own source."""
-    conn, a, b = corpus
+    conn, _a, _b = corpus
 
     class Stub:
         def detect(self, transcript, skip=frozenset()):

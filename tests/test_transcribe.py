@@ -48,9 +48,11 @@ def test_download_audio_reports_http_errors(tmp_path):
         return httpx.Response(404)
 
     dest = tmp_path / "audio" / "1.mp3"
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            transcribe.download_audio(client, AUDIO_URL, dest)
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        transcribe.download_audio(client, AUDIO_URL, dest)
     assert not dest.exists()  # partial file renamed only on success
 
 

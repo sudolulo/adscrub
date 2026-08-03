@@ -46,9 +46,9 @@ import re
 import sqlite3
 import statistics
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .detect import DetectedAdSpan, insert_spans
 
