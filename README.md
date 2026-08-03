@@ -1,7 +1,5 @@
 # adscrub
 
-[![test](https://github.com/sudolulo/adscrub/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sudolulo/adscrub/actions) [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/) [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE) [![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/sudolulo) [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/sudolulo)
-
 Self-hosted podcast ad-detection and removal proxy. It sits between a real RSS feed
 and your podcast player: fetch each new episode server-side, find the ad spans,
 cut them out of the audio, and re-host a clean feed that the player subscribes to
@@ -114,12 +112,6 @@ adscrub's schema-coupled functions (`pending_episodes`, `transcribe_episode`,
 this package. An earlier pass at the merge fully copied this source into
 `src/hark/`, which was the wrong shape and got reverted — see hark's
 CHANGELOG 0.4.0.
-
-## AI use disclosure
-
-This project is developed with substantial assistance from AI coding tools
-(Anthropic Claude). Design decisions and review are human; much of the code is
-AI-written.
 
 ## Support
 
