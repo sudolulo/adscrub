@@ -1,5 +1,7 @@
 # adscrub
 
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-%E2%9D%A4-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/sudolulo) [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/sudolulo)
+
 Self-hosted podcast ad-detection and removal proxy. It sits between a real RSS feed
 and your podcast player: fetch each new episode server-side, find the ad spans,
 cut them out of the audio, and re-host a clean feed that the player subscribes to
