@@ -1,5 +1,7 @@
 # adscrub
 
+[![Tests](https://git.arch.fyi/flan/adscrub/actions/workflows/test.yml/badge.svg)](https://git.arch.fyi/flan/adscrub/actions)
+
 Self-hosted podcast ad-detection and removal proxy. It sits between a real RSS feed
 and your podcast player: fetch each new episode server-side, find the ad spans,
 cut them out of the audio, and re-host a clean feed that the player subscribes to
